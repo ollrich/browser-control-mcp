@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](http://keepachangelog.com/)
 and this project adheres to [Semantic Versioning](http://semver.org/).
 
+## 1.6.1-ollie.1 - 2026-10-20
+
+### Added
+
+- `read-tab`: read an open tab in one call, found by URL or title fragment, by tabId, or the most recently used tab. Replaces the list then fetch round trip.
+- `open-and-read-tab`: open an https URL, poll until the tab reports `complete`, wait a settle time, retry once if the page is still an empty script shell, then return the text. Optional `closeAfter`.
+- Slim output for both new tools: compacted whitespace, links off by default, links deduplicated (hash and trailing slash ignored, self links dropped) and capped, optional `maxChars`.
+- `includeLinks` flag on `get-tab-web-content` (default true, unchanged behaviour).
+
+### Notes
+
+- The new tools only use the original extension commands (`open-tab`, `get-tab-list`, `get-tab-content`, `close-tabs`), so they work with the stock add-on from addons.mozilla.org and through singleton broker forwarding.
+
 ## 1.6.1 - 2026-05-17
 
 ### Fixed

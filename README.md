@@ -15,6 +15,15 @@ The MCP server supports the following tools:
 - Read a webpage's text content and links (requires user consent)
 - Find and highlight text in a browser tab (requires user consent)
 
+## Fork additions (ollie)
+
+Two one step tools on top of the singleton broker fork, built for research workflows where a plain web fetch returns stale or empty pages:
+
+- `read-tab` reads an open tab by URL or title fragment (`"x.com/rohan"`), by `tabId`, or the most recently used tab when called without arguments.
+- `open-and-read-tab` opens a URL, waits until it has loaded and rendered, and returns the text. Script heavy pages get one automatic retry.
+
+Both return compacted text without links by default (`includeLinks: true` to get a deduplicated, capped link list). They only use commands the stock add-on already supports, so no extension update is needed.
+
 ## Example use-cases:
 
 ### Tab management

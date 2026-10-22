@@ -17,6 +17,8 @@ export interface BrowserTab {
   url?: string;
   title?: string;
   lastAccessed?: number;
+  // Firefox sends the full tabs.Tab object; status is "loading" or "complete".
+  status?: string;
 }
 
 export interface TabsExtensionMessage extends ExtensionMessageBase {
