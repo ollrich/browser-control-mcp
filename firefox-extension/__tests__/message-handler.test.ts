@@ -107,6 +107,7 @@ describe("MessageHandler", () => {
         // Assert
         expect(browser.tabs.create).toHaveBeenCalledWith({
           url: "https://example.com",
+          active: true,
         });
         expect(mockClient.sendResourceToServer).toHaveBeenCalledWith({
           resource: "opened-tab-id",
@@ -200,6 +201,7 @@ describe("MessageHandler", () => {
         // Assert
         expect(browser.tabs.create).toHaveBeenCalledWith({
           url: "https://allowed.com",
+          active: true,
         });
         expect(mockClient.sendResourceToServer).toHaveBeenCalledWith({
           resource: "opened-tab-id",
@@ -643,6 +645,76 @@ describe("MessageHandler", () => {
           messageHandler.handleDecodedMessage(request)
         ).rejects.toThrow();
         expect(browser.find.find).not.toHaveBeenCalled();
+      });
+    });
+
+    describe("extension 2.0 additions", () => {
+      it("should answer the version handshake without an audit log entry", async () => {
+        const request: ServerMessageRequest = {
+          cmd: "get-extension-info",
+          correlationId: "test-correlation-id",
+        };
+
+        await messageHandler.handleDecodedMessage(request);
+
+        const sent = (mockClient.sendResourceToServer as jest.Mock).mock.calls[0][0];
+        expect(sent.resource).toBe("extension-info");
+        expect(sent.version).toBe("1.6.1");
+        expect(sent.commands).toEqual(expect.arrayContaining(["get-tab-content", "get-extension-info"]));
+        expect(browser.storage.local.set).not.toHaveBeenCalled();
+      });
+
+      it("should open a tab in the background when asked", async () => {
+        (browser.tabs.create as jest.Mock).mockResolvedValue({ id: 7 });
+
+        await messageHandler.handleDecodedMessage({
+          cmd: "open-tab",
+          url: "https://example.com",
+          active: false,
+          correlationId: "test-correlation-id",
+        });
+
+        expect(browser.tabs.create).toHaveBeenCalledWith({ url: "https://example.com", active: false });
+      });
+
+      it("should skip collecting links when includeLinks is false", async () => {
+        (browser.tabs.get as jest.Mock).mockResolvedValue({ id: 123, url: "https://example.com" });
+        (browser.permissions.contains as jest.Mock).mockResolvedValue(true);
+        (browser.tabs.executeScript as jest.Mock).mockResolvedValue([
+          { links: [], fullText: "text", isTruncated: false, totalLength: 4 },
+        ]);
+
+        await messageHandler.handleDecodedMessage({
+          cmd: "get-tab-content",
+          tabId: 123,
+          includeLinks: false,
+          correlationId: "test-correlation-id",
+        });
+
+        const code = (browser.tabs.executeScript as jest.Mock).mock.calls[0][1].code as string;
+        expect(code).toContain("links: []");
+        expect(code).not.toContain("links: getLinks()");
+      });
+    });
+
+    describe("audit log", () => {
+      it("should count repeated polling calls instead of adding entries", async () => {
+        const { addAuditLogEntry } = jest.requireActual("../extension-config");
+        let stored: ExtensionConfig = { secret: "s", ports: [8089], auditLog: [] };
+        (browser.storage.local.get as jest.Mock).mockImplementation(async () => ({ config: stored }));
+        (browser.storage.local.set as jest.Mock).mockImplementation(async ({ config }) => {
+          stored = config;
+        });
+
+        const now = Date.now();
+        await addAuditLogEntry({ toolId: "get-list-of-open-tabs", command: "get-tab-list", timestamp: now });
+        await addAuditLogEntry({ toolId: "get-list-of-open-tabs", command: "get-tab-list", timestamp: now + 300 });
+        await addAuditLogEntry({ toolId: "get-list-of-open-tabs", command: "get-tab-list", timestamp: now + 600 });
+        await addAuditLogEntry({ toolId: "get-tab-web-content", command: "get-tab-content", timestamp: now + 700, url: "https://a.de" });
+
+        expect(stored.auditLog).toHaveLength(2);
+        expect(stored.auditLog?.[1]).toMatchObject({ command: "get-tab-list", count: 3, timestamp: now + 600 });
+        expect(stored.auditLog?.[0]).toMatchObject({ command: "get-tab-content", url: "https://a.de" });
       });
     });
 

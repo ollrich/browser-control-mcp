@@ -63,6 +63,11 @@ export function buildPortInUseMessage(port: number): string {
   );
 }
 
+export interface ExtensionInfo {
+  version: string;
+  commands: string[];
+}
+
 interface ExtensionRequestResolver<T extends ExtensionMessage["resource"]> {
   resource: T;
   resolve: (value: Extract<ExtensionMessage, { resource: T }>) => void;
@@ -80,6 +85,8 @@ export class BrowserAPI {
   private brokerServer: ReturnType<typeof createBrokerServer> | null = null;
   private selectedPort: number | null = null;
   private recovery: Promise<void> | null = null;
+  // Handshake result per extension connection; null means the stock add-on.
+  private extensionInfoCache: { socket: WebSocket | null; info: ExtensionInfo | null } | null = null;
 
   // Map to persist the request to the extension. It maps the request correlationId
   // to a resolver, fulfulling a promise created when sending a message to the extension.
@@ -135,11 +142,12 @@ export class BrowserAPI {
     return this.wsServers[0]?.options.port ?? this.selectedPort ?? undefined;
   }
 
-  async openTab(url: string): Promise<number | undefined> {
-    return this.run("openTab", [url], async () => {
+  async openTab(url: string, active?: boolean): Promise<number | undefined> {
+    return this.run("openTab", [url, active], async () => {
       const correlationId = await this.sendMessageToExtension({
         cmd: "open-tab",
         url,
+        ...(active === undefined ? {} : { active }),
       });
       const message = await this.waitForResponse(correlationId, "opened-tab-id");
       return message.tabId;
@@ -201,13 +209,15 @@ export class BrowserAPI {
 
   async getTabContent(
     tabId: number,
-    offset: number
+    offset: number,
+    includeLinks?: boolean
   ): Promise<TabContentExtensionMessage> {
-    return this.run("getTabContent", [tabId, offset], async () => {
+    return this.run("getTabContent", [tabId, offset, includeLinks], async () => {
       const correlationId = await this.sendMessageToExtension({
         cmd: "get-tab-content",
         tabId,
         offset,
+        ...(includeLinks === undefined ? {} : { includeLinks }),
       });
       return await this.waitForResponse(correlationId, "tab-content");
     });
@@ -277,6 +287,29 @@ export class BrowserAPI {
         "screenshot",
         SCREENSHOT_RESPONSE_TIMEOUT_MS
       );
+    });
+  }
+
+  // Version and commands of the connected extension, or null for the stock
+  // add-on, which rejects the handshake like any unknown command.
+  async getExtensionInfo(): Promise<ExtensionInfo | null> {
+    return this.run("getExtensionInfo", [], async () => {
+      if (this.extensionInfoCache && this.extensionInfoCache.socket === this.ws) {
+        return this.extensionInfoCache.info;
+      }
+      let info: ExtensionInfo | null = null;
+      try {
+        const correlationId = await this.sendMessageToExtension({ cmd: "get-extension-info" });
+        const message = await this.waitForResponse(correlationId, "extension-info");
+        info = { version: message.version, commands: message.commands };
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : String(error);
+        if (!/disabled in extension settings|Timed out/i.test(reason)) {
+          throw error;
+        }
+      }
+      this.extensionInfoCache = { socket: this.ws, info };
+      return info;
     });
   }
 
@@ -501,7 +534,7 @@ export class BrowserAPI {
   private async dispatchOperation(operation: BrowserApiOperation, args: unknown[]): Promise<unknown> {
     switch (operation) {
       case "openTab":
-        return await this.openTab(args[0] as string);
+        return await this.openTab(args[0] as string, args[1] as boolean | undefined);
       case "closeTabs":
         return await this.closeTabs(args[0] as number[]);
       case "getTabList":
@@ -513,7 +546,7 @@ export class BrowserAPI {
       case "getBrowserRecentHistory":
         return await this.getBrowserRecentHistory(args[0] as string | undefined);
       case "getTabContent":
-        return await this.getTabContent(args[0] as number, args[1] as number);
+        return await this.getTabContent(args[0] as number, args[1] as number, args[2] as boolean | undefined);
       case "reorderTabs":
         return await this.reorderTabs(args[0] as number[]);
       case "findHighlight":
@@ -525,6 +558,8 @@ export class BrowserAPI {
           args[2] as string,
           args[3] as string
         );
+      case "getExtensionInfo":
+        return await this.getExtensionInfo();
       case "captureScreenshot":
         return await this.captureScreenshot(
           args[0] as number,

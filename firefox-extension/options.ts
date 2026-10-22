@@ -348,7 +348,8 @@ async function loadAuditLog() {
       
       // Tool name
       const toolCell = document.createElement("td");
-      toolCell.textContent = getToolNameById(entry.toolId);
+      toolCell.textContent =
+        getToolNameById(entry.toolId) + (entry.count && entry.count > 1 ? ` (×${entry.count})` : "");
       row.appendChild(toolCell);
       
       // Timestamp

@@ -5,6 +5,8 @@ export interface ServerMessageBase {
 export interface OpenTabServerMessage extends ServerMessageBase {
   cmd: "open-tab";
   url: string;
+  // false opens the tab in the background. Extension 2.0; older builds ignore it.
+  active?: boolean;
 }
 
 export interface CloseTabsServerMessage extends ServerMessageBase {
@@ -30,6 +32,8 @@ export interface GetTabContentServerMessage extends ServerMessageBase {
   cmd: "get-tab-content";
   tabId: number;
   offset?: number;
+  // false skips collecting links. Extension 2.0; older builds ignore it.
+  includeLinks?: boolean;
 }
 
 export interface ReorderTabsServerMessage extends ServerMessageBase {
@@ -63,6 +67,11 @@ export interface CaptureScreenshotServerMessage extends ServerMessageBase {
   scale?: number;
 }
 
+// Extension 2.0: version and supported commands. Older builds reject it.
+export interface GetExtensionInfoServerMessage extends ServerMessageBase {
+  cmd: "get-extension-info";
+}
+
 export type ServerMessage =
   | OpenTabServerMessage
   | CloseTabsServerMessage
@@ -74,6 +83,7 @@ export type ServerMessage =
   | FindHighlightServerMessage
   | GroupTabsServerMessage
   | GetCurrentTabServerMessage
-  | CaptureScreenshotServerMessage;
+  | CaptureScreenshotServerMessage
+  | GetExtensionInfoServerMessage;
 
 export type ServerMessageRequest = ServerMessage & { correlationId: string };

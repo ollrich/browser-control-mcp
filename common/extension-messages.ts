@@ -86,6 +86,12 @@ export interface ScreenshotExtensionMessage extends ExtensionMessageBase {
   mimeType: string;
 }
 
+export interface ExtensionInfoExtensionMessage extends ExtensionMessageBase {
+  resource: "extension-info";
+  version: string;
+  commands: string[];
+}
+
 export type ExtensionMessage =
   | TabContentExtensionMessage
   | TabsExtensionMessage
@@ -97,7 +103,8 @@ export type ExtensionMessage =
   | TabsClosedExtensionMessage
   | TabGroupCreatedExtensionMessage
   | CurrentTabExtensionMessage
-  | ScreenshotExtensionMessage;
+  | ScreenshotExtensionMessage
+  | ExtensionInfoExtensionMessage;
 
 export interface ExtensionError {
   correlationId: string;

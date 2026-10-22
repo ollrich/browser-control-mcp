@@ -24,13 +24,16 @@ export class MessageHandler {
       throw new Error(`Command '${req.cmd}' is disabled in extension settings`);
     }
 
-    this.addAuditLogForReq(req).catch((error) => {
-      console.error("Failed to add audit log entry:", error);
-    });
+    // The handshake carries no user data, so it stays out of the audit log.
+    if (req.cmd !== "get-extension-info") {
+      this.addAuditLogForReq(req).catch((error) => {
+        console.error("Failed to add audit log entry:", error);
+      });
+    }
 
     switch (req.cmd) {
       case "open-tab":
-        await this.openUrl(req.correlationId, req.url);
+        await this.openUrl(req.correlationId, req.url, req.active);
         break;
       case "close-tabs":
         await this.closeTabs(req.correlationId, req.tabIds);
@@ -45,7 +48,7 @@ export class MessageHandler {
         await this.sendRecentHistory(req.correlationId, req.searchQuery);
         break;
       case "get-tab-content":
-        await this.sendTabsContent(req.correlationId, req.tabId, req.offset);
+        await this.sendTabsContent(req.correlationId, req.tabId, req.offset, req.includeLinks);
         break;
       case "reorder-tabs":
         await this.reorderTabs(req.correlationId, req.tabOrder);
@@ -68,6 +71,9 @@ export class MessageHandler {
         break;
       case "get-current-tab":
         await this.sendCurrentTab(req.correlationId);
+        break;
+      case "get-extension-info":
+        await this.sendExtensionInfo(req.correlationId);
         break;
       case "capture-screenshot":
         await this.captureScreenshot(
@@ -110,7 +116,7 @@ export class MessageHandler {
     await addAuditLogEntry(auditEntry);
   }
 
-  private async openUrl(correlationId: string, url: string): Promise<void> {
+  private async openUrl(correlationId: string, url: string, active = true): Promise<void> {
     if (!url.startsWith("https://")) {
       console.error("Invalid URL:", url);
       throw new Error("Invalid URL");
@@ -122,6 +128,7 @@ export class MessageHandler {
 
     const tab = await browser.tabs.create({
       url,
+      active,
     });
 
     await this.client.sendResourceToServer({
@@ -240,7 +247,8 @@ export class MessageHandler {
   private async sendTabsContent(
     correlationId: string,
     tabId: number,
-    offset?: number
+    offset?: number,
+    includeLinks = true
   ): Promise<void> {
     const tab = await browser.tabs.get(tabId);
     if (tab.url && (await isDomainInDenyList(tab.url))) {
@@ -275,7 +283,7 @@ export class MessageHandler {
         const textContent = getTextContent();
 
         return {
-          links: getLinks(),
+          links: ${includeLinks ? "getLinks()" : "[]"},
           fullText: textContent.text,
           isTruncated: textContent.isTruncated,
           totalLength: document.body.innerText.length
@@ -383,6 +391,16 @@ export class MessageHandler {
       resource: "find-highlight-result",
       correlationId,
       noOfResults: findResults.count,
+    });
+  }
+
+  // Lets the server tell this build from the stock add-on, which rejects the command.
+  private async sendExtensionInfo(correlationId: string): Promise<void> {
+    await this.client.sendResourceToServer({
+      resource: "extension-info",
+      correlationId,
+      version: browser.runtime.getManifest().version,
+      commands: Object.keys(COMMAND_TO_TOOL_ID),
     });
   }
 

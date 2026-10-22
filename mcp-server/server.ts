@@ -237,7 +237,7 @@ registerTool(
   },
   READS_WEB,
   async ({ tabId, offset, includeLinks }) => {
-    const content = await browserApi.getTabContent(tabId, offset);
+    const content = await browserApi.getTabContent(tabId, offset, includeLinks);
     let links: { type: "text"; text: string }[] = [];
     if (offset === 0 && includeLinks) {
       // Only include the links if offset is 0 (default value). Otherwise, we can
@@ -459,6 +459,8 @@ interface OpenReadOptions extends SlimReadOptions {
   timeoutMs: number;
   closeAfter: boolean;
   waitForText?: string;
+  // Open without switching to the tab (extension 2.0; the stock add-on ignores it).
+  background?: boolean;
 }
 
 // The page still waits for the user's domain consent; the tab is worth keeping.
@@ -522,7 +524,8 @@ async function waitForConsent(pageUrl: string | undefined, timeoutMs: number): P
 async function fetchTabContent(
   tab: BrowserTab,
   offset: number,
-  consentWaitMs: number
+  consentWaitMs: number,
+  includeLinks = false
 ): Promise<TabContentExtensionMessage> {
   const tabId = tab.id as number;
   const pendingConsent = (error: unknown) =>
@@ -531,7 +534,7 @@ async function fetchTabContent(
     );
 
   try {
-    return await browserApi.getTabContent(tabId, offset);
+    return await browserApi.getTabContent(tabId, offset, includeLinks);
   } catch (error) {
     if (!CONSENT_ERROR.test(errorText(error))) {
       throw error;
@@ -542,7 +545,7 @@ async function fetchTabContent(
       throw pendingConsent(error);
     }
     try {
-      return await browserApi.getTabContent(tabId, offset);
+      return await browserApi.getTabContent(tabId, offset, includeLinks);
     } catch (retryError) {
       throw CONSENT_ERROR.test(errorText(retryError)) ? pendingConsent(retryError) : retryError;
     }
@@ -566,13 +569,14 @@ async function readWhenStable(
   offset: number,
   maxSettleMs: number,
   consentWaitMs: number,
-  waitForText?: string
+  waitForText?: string,
+  includeLinks = false
 ): Promise<{ content: TabContentExtensionMessage; textFound?: boolean }> {
   const needle = waitForText ? normalizeForSearch(waitForText) : "";
   const containsNeedle = (c: TabContentExtensionMessage) =>
     normalizeForSearch(c.fullText).includes(needle);
 
-  let content = await fetchTabContent(tab, offset, consentWaitMs);
+  let content = await fetchTabContent(tab, offset, consentWaitMs, includeLinks);
   let length = compactText(content.fullText).length;
   let matchingReads = 1;
   let delay = 600;
@@ -584,7 +588,7 @@ async function readWhenStable(
   while (!settled() && Date.now() + delay <= deadline) {
     await sleep(delay);
     delay = Math.min(Math.round(delay * 1.5), needle ? 1000 : 2000);
-    const next = await fetchTabContent(tab, offset, 0);
+    const next = await fetchTabContent(tab, offset, 0, includeLinks);
     const nextLength = compactText(next.fullText).length;
     matchingReads = lengthsSettled(length, nextLength) ? matchingReads + 1 : 1;
     content = next;
@@ -672,7 +676,7 @@ async function openAndRead(
   opts: OpenReadOptions
 ): Promise<{ content: TextContent[]; isError?: boolean }> {
   const { url, note } = normalizeOpenUrl(input);
-  const tabId = await browserApi.openTab(url);
+  const tabId = await browserApi.openTab(url, opts.background ? false : undefined);
   if (tabId === undefined) {
     return { content: [{ type: "text", text: "Failed to open tab" }], isError: true };
   }
@@ -689,7 +693,8 @@ async function openAndRead(
         opts.offset,
         opts.maxSettleMs,
         opts.consentWaitMs,
-        opts.waitForText
+        opts.waitForText,
+        opts.includeLinks
       );
     } catch (error) {
       // Keep the tab, so read-tab can pick it up once the user has granted access.
@@ -756,7 +761,7 @@ async function withTemporaryTab<T>(
   use: (tab: BrowserTab) => Promise<T>
 ): Promise<T> {
   const { url: target } = normalizeOpenUrl(url);
-  const tabId = await browserApi.openTab(target);
+  const tabId = await browserApi.openTab(target, false);
   if (tabId === undefined) {
     throw new Error(`Failed to open a temporary tab for ${url}`);
   }
@@ -779,7 +784,7 @@ async function withTemporaryTab<T>(
 async function readOneTab(tab: BrowserTab, offset: number, opts: SlimReadOptions): Promise<TextContent[]> {
   if (tab.discarded && tab.url) {
     const result = await withTemporaryTab(tab.url, opts.consentWaitMs, async (copy) => {
-      const first = await fetchTabContent(copy, offset, 0);
+      const first = await fetchTabContent(copy, offset, 0, opts.includeLinks);
       const content = await extendToMaxChars(copy, offset, first, opts.maxChars);
       return formatTabContent(copy, offset, content, opts, true);
     });
@@ -789,7 +794,7 @@ async function readOneTab(tab: BrowserTab, offset: number, opts: SlimReadOptions
     });
     return result;
   }
-  const first = await fetchTabContent(tab, offset, opts.consentWaitMs);
+  const first = await fetchTabContent(tab, offset, opts.consentWaitMs, opts.includeLinks);
   const content = await extendToMaxChars(tab, offset, first, opts.maxChars);
   return formatTabContent(tab, offset, content, opts);
 }
@@ -989,10 +994,15 @@ registerTool(
       .string()
       .optional()
       .describe("Read as soon as this text appears on the page (case insensitive) instead of waiting for the text to stop changing. Bounded by maxSettleMs."),
+    background: z
+      .boolean()
+      .optional()
+      .describe("Open without switching to the tab. Default: true with closeAfter. Needs extension 2.0, the stock add-on always switches."),
     ...slimParams,
   },
   OPENS_PAGES,
-  async ({ url, ...opts }) => openAndRead(url, { ...opts, offset: 0 })
+  async ({ url, background, ...opts }) =>
+    openAndRead(url, { ...opts, background: background ?? opts.closeAfter, offset: 0 })
 );
 
 if (toolProfile !== "all" && toolProfile !== "read") {

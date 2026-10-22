@@ -53,6 +53,7 @@ function startFakeExtension(port, state) {
   ws.on("message", (raw) => {
     const { payload } = JSON.parse(raw.toString());
     state.commands.push(payload.cmd);
+    state.payloads.push(payload);
     const reply = (body) => {
       const p = { ...body, correlationId: payload.correlationId };
       ws.send(JSON.stringify({ payload: p, signature: sign(p) }));
@@ -115,6 +116,10 @@ function startFakeExtension(port, state) {
         });
         break;
       }
+      case "get-extension-info":
+        if (!state.ownBuild) return fail(`Command '${payload.cmd}' is disabled in extension settings`);
+        reply({ resource: "extension-info", version: "2.0.0", commands: state.ownBuild });
+        break;
       default:
         // The stock add-on rejects commands it does not know.
         fail(`Command '${payload.cmd}' is disabled in extension settings`);
@@ -146,6 +151,9 @@ const grantConsent = (origin) => {
 const longText = "Rohan Nayak post\n\n\n\n\n" + "Pocket FM grew a lot.   ".repeat(30);
 const state = {
   commands: [],
+  payloads: [],
+  // Command list of an own 2.0 build; false behaves like the stock add-on.
+  ownBuild: false,
   nextId: 100,
   pageCap: 50_000,
   deniedOrigins: new Set(),
@@ -453,6 +461,22 @@ test("BROWSER_MCP_TOOLS limits the offered tools", async () => {
     await readOnly.close();
     await picked.close();
   }
+});
+
+test("temporary tabs open in the background and links are only requested when wanted", async () => {
+  state.payloads.length = 0;
+  state.pages["https://quiet.example"] = { text: "Quiet page" };
+  await leader.callTool({ name: "open-and-read-tab", arguments: { url: "https://quiet.example", settleMs: 0, closeAfter: true } });
+  assert.equal(state.payloads.find((p) => p.cmd === "open-tab").active, false);
+  assert.ok(state.payloads.filter((p) => p.cmd === "get-tab-content").every((p) => p.includeLinks === false));
+
+  state.payloads.length = 0;
+  await leader.callTool({ name: "read-tab", arguments: { tabId: 1, includeLinks: true } });
+  assert.equal(state.payloads.find((p) => p.cmd === "get-tab-content").includeLinks, true);
+
+  state.payloads.length = 0;
+  await leader.callTool({ name: "open-and-read-tab", arguments: { url: "https://quiet.example", settleMs: 0 } });
+  assert.equal(state.payloads.find((p) => p.cmd === "open-tab").active, undefined, "kept tabs open in front");
 });
 
 test("a second session forwards through the broker", async () => {

@@ -6,6 +6,7 @@ import { ServerMessageRequest } from "@browser-control-mcp/common/server-message
 
 const DEFAULT_WS_PORT = 8089;
 const AUDIT_LOG_SIZE_LIMIT = 100; // Maximum number of audit log entries to keep
+const AUDIT_LOG_MERGE_WINDOW_MS = 60_000;
 
 // Define all available tools with their IDs and descriptions
 export interface ToolInfo {
@@ -80,6 +81,8 @@ export const COMMAND_TO_TOOL_ID: Record<ServerMessageRequest["cmd"], string> = {
   "group-tabs": "reorder-browser-tabs",
   "get-current-tab": "get-current-tab",
   "capture-screenshot": "capture-tab-screenshot",
+  // Not a tool of its own and not switchable: the version handshake.
+  "get-extension-info": "extension-info",
 };
 
 // Storage schema for tool settings
@@ -93,6 +96,8 @@ export interface AuditLogEntry {
   command: string;
   timestamp: number;
   url?: string;
+  // Repeats of the same call within AUDIT_LOG_MERGE_WINDOW_MS, e.g. polling.
+  count?: number;
 }
 
 // Extended config interface
@@ -295,8 +300,21 @@ export async function addAuditLogEntry(entry: AuditLogEntry): Promise<void> {
     config.auditLog = [];
   }
   
-  // Add the new entry at the beginning
-  config.auditLog.unshift(entry);
+  // Polling (waiting for a page to load) repeats the same call many times;
+  // count repeats instead of pushing older entries out of the log.
+  const latest = config.auditLog[0];
+  if (
+    latest &&
+    latest.command === entry.command &&
+    latest.url === entry.url &&
+    entry.timestamp - latest.timestamp <= AUDIT_LOG_MERGE_WINDOW_MS
+  ) {
+    latest.count = (latest.count ?? 1) + 1;
+    latest.timestamp = entry.timestamp;
+  } else {
+    // Add the new entry at the beginning
+    config.auditLog.unshift(entry);
+  }
   
   // Keep only the last AUDIT_LOG_SIZE_LIMIT entries
   if (config.auditLog.length > AUDIT_LOG_SIZE_LIMIT) {

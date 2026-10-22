@@ -41,6 +41,7 @@ const mockBrowser = {
   },
   runtime: {
     getURL: jest.fn(),
+    getManifest: jest.fn(() => ({ version: "1.6.1" })),
   },
 };
 

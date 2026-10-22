@@ -29,7 +29,8 @@ Per project: `cd mcp-server && npm test` (builds first) or `cd firefox-extension
 ## Rules
 
 - **Read only.** No tools that click, type, submit forms or run arbitrary scripts in pages.
-- **Stay compatible with the stock add-on** (eyalzh, addons.mozilla.org). Server features should build on existing commands (`open-tab`, `get-tab-list`, `get-tab-content`, `close-tabs`, `capture-screenshot`) or degrade with a clear message. The stock add-on rejects unknown commands as "disabled in extension settings".
+- **Stay compatible with the stock add-on** (eyalzh, addons.mozilla.org). Server features should build on existing commands (`open-tab`, `get-tab-list`, `get-tab-content`, `close-tabs`, `capture-screenshot`) or degrade with a clear message. The stock add-on rejects unknown commands as "disabled in extension settings" and ignores unknown fields.
+- **Extension 2.0 features** are detected with the `get-extension-info` handshake (`BrowserAPI.getExtensionInfo()`, `null` for the stock add-on), which lists the supported commands. New commands must be checked there first; new optional fields on existing commands (like `active`, `includeLinks`) need no check.
 - **Protocol changes touch all three parts**: union types in `common/*-messages.ts`, the server (`browser-api.ts`, broker operation whitelist in `browser-operations.ts`, tool in `server.ts`) and the extension (`message-handler.ts`, command to tool mapping in `extension-config.ts`), with tests on both sides.
 - **Keep the security model**: signed messages, per domain consent for page content, per tab consent for screenshots, domain deny list, per tool toggles and audit log in the extension.
 - Strict TypeScript, exhaustive `switch` with `never`, `zod` for tool input. Match the style of the file you touch.
