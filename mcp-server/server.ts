@@ -33,10 +33,18 @@ const mcpServer = new McpServer({
   version: readPackageVersion(),
 });
 
+// MCP tool annotations, so clients can tell reading tools from ones that change
+// the browser. openWorldHint marks tools that load or read web content.
+const READS_BROWSER = { readOnlyHint: true, openWorldHint: false };
+const READS_WEB = { readOnlyHint: true, openWorldHint: true };
+const OPENS_PAGES = { readOnlyHint: false, destructiveHint: false, openWorldHint: true };
+const CHANGES_TABS = { readOnlyHint: false, destructiveHint: false, openWorldHint: false };
+
 mcpServer.tool(
   "open-browser-tab",
   "Open a new tab in the user's browser (useful when the user asks to open a website)",
   { url: z.string() },
+  OPENS_PAGES,
   async ({ url: input }) => {
     const { url, note } = normalizeOpenUrl(input);
     const openedTabId = await browserApi.openTab(url);
@@ -62,6 +70,7 @@ mcpServer.tool(
   "close-browser-tabs",
   "Close tabs in the user's browser by tab IDs",
   { tabIds: z.array(z.number()) },
+  { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
   async ({ tabIds }) => {
     await browserApi.closeTabs(tabIds);
     return {
@@ -77,6 +86,7 @@ mcpServer.tool(
     offset: z.number().int().min(0).default(0).describe("Starting index for pagination (0-based, must be >= 0)"),
     limit: z.number().default(100).describe("Maximum number of tabs to return (default: 100, max: 500)"),
   },
+  READS_BROWSER,
   async ({ offset, limit }) => {
     // Validate and cap the limit
     const effectiveLimit = Math.min(Math.max(1, limit), 500);
@@ -115,6 +125,7 @@ mcpServer.tool(
   "get-current-tab",
   "Get information about the currently active tab in the browser",
   {},
+  READS_BROWSER,
   async () => {
     const currentTab = await browserApi.getCurrentTab();
     return {
@@ -132,6 +143,7 @@ mcpServer.tool(
   "get-tab-metadata",
   "Get comprehensive metadata about a specific tab, including state, position, window, audio, dimensions, favicon, and last access properties when available.",
   { tabId: z.number() },
+  READS_BROWSER,
   async ({ tabId }) => {
     const metadata = await browserApi.getTabMetadata(tabId);
     return {
@@ -149,6 +161,7 @@ mcpServer.tool(
   "get-recent-browser-history",
   "Get the list of recent browser history (to get all, don't use searchQuery)",
   { searchQuery: z.string().optional() },
+  READS_BROWSER,
   async ({ searchQuery }) => {
     const browserHistory = await browserApi.getBrowserRecentHistory(
       searchQuery
@@ -186,6 +199,7 @@ mcpServer.tool(
     offset: z.number().default(0),
     includeLinks: z.boolean().default(true).describe("Set false to skip the link list"),
   },
+  READS_WEB,
   async ({ tabId, offset, includeLinks }) => {
     const content = await browserApi.getTabContent(tabId, offset);
     let links: { type: "text"; text: string }[] = [];
@@ -228,6 +242,7 @@ mcpServer.tool(
   "reorder-browser-tabs",
   "Change the order of open browser tabs",
   { tabOrder: z.array(z.number()) },
+  { ...CHANGES_TABS, idempotentHint: true },
   async ({ tabOrder }) => {
     const newOrder = await browserApi.reorderTabs(tabOrder);
     return {
@@ -242,6 +257,7 @@ mcpServer.tool(
   "find-highlight-in-browser-tab",
   "Find and highlight text in a browser tab (use a query phrase that exists in the web content)",
   { tabId: z.number(), queryPhrase: z.string() },
+  CHANGES_TABS,
   async ({ tabId, queryPhrase }) => {
     const noOfResults = await browserApi.findHighlight(tabId, queryPhrase);
     return {
@@ -276,6 +292,7 @@ mcpServer.tool(
       .default("grey"),
     groupTitle: z.string().default("New Group"),
   },
+  CHANGES_TABS,
   async ({ tabIds, isCollapsed, groupColor, groupTitle }) => {
     const groupId = await browserApi.groupTabs(
       tabIds,
@@ -323,6 +340,7 @@ mcpServer.tool(
       .default(1)
       .describe("Image scale relative to CSS pixels, lower values produce smaller images"),
   },
+  READS_WEB,
   async ({ tabId, format, quality, scale }) => {
     const targetId = tabId ?? pickActiveTab(await browserApi.getTabList(), true)?.id;
     if (targetId === undefined) {
@@ -360,6 +378,9 @@ const CONSENT_POLL_MS = 1500;
 // Never seeing the consent tab means the extension works differently; stop waiting.
 const CONSENT_TAB_GRACE_MS = 4000;
 const CONSENT_ERROR = /not yet granted permission to access the domain/i;
+// The extension returns one chunk of about 50k raw characters per call; with a
+// larger maxChars further chunks are fetched, up to this many.
+const MAX_CHUNKS_PER_READ = 10;
 
 const slimParams = {
   includeLinks: z
@@ -372,7 +393,9 @@ const slimParams = {
     .int()
     .min(0)
     .default(0)
-    .describe("Optional extra cap on returned characters (0 = only the extension's 50k page cap). The reply names the offset to continue from."),
+    .describe(
+      "Cap on returned characters. 0 = one chunk of about 50k raw characters. Larger values fetch further chunks until the cap or the page end. The reply names the offset to continue from."
+    ),
   consentWaitMs: z
     .number()
     .int()
@@ -395,6 +418,7 @@ interface OpenReadOptions extends SlimReadOptions {
   maxSettleMs: number;
   timeoutMs: number;
   closeAfter: boolean;
+  waitForText?: string;
 }
 
 // The page still waits for the user's domain consent; the tab is worth keeping.
@@ -489,31 +513,70 @@ function lengthsSettled(previous: number, current: number): boolean {
   return Math.abs(previous - current) <= Math.floor(Math.max(previous, current) * 0.005);
 }
 
+function normalizeForSearch(text: string): string {
+  return text.replace(/\s+/g, " ").trim().toLowerCase();
+}
+
 // Script heavy pages (X, Bluesky, SPAs) keep rendering after "complete". Read
 // until the text length stops changing (two matching reads, three while the page
-// still looks like an empty shell) or maxSettleMs runs out.
+// still looks like an empty shell), or with waitForText until that text shows
+// up, at most until maxSettleMs runs out.
 async function readWhenStable(
   tab: BrowserTab,
   offset: number,
   maxSettleMs: number,
-  consentWaitMs: number
-): Promise<TabContentExtensionMessage> {
+  consentWaitMs: number,
+  waitForText?: string
+): Promise<{ content: TabContentExtensionMessage; textFound?: boolean }> {
+  const needle = waitForText ? normalizeForSearch(waitForText) : "";
+  const containsNeedle = (c: TabContentExtensionMessage) =>
+    normalizeForSearch(c.fullText).includes(needle);
+
   let content = await fetchTabContent(tab, offset, consentWaitMs);
   let length = compactText(content.fullText).length;
   let matchingReads = 1;
   let delay = 600;
   const deadline = Date.now() + maxSettleMs;
-  while (
-    matchingReads < (length >= MIN_RENDERED_CHARS ? 2 : 3) &&
-    Date.now() + delay <= deadline
-  ) {
+  const settled = () =>
+    needle
+      ? containsNeedle(content)
+      : matchingReads >= (length >= MIN_RENDERED_CHARS ? 2 : 3);
+  while (!settled() && Date.now() + delay <= deadline) {
     await sleep(delay);
-    delay = Math.min(Math.round(delay * 1.5), 2000);
+    delay = Math.min(Math.round(delay * 1.5), needle ? 1000 : 2000);
     const next = await fetchTabContent(tab, offset, 0);
     const nextLength = compactText(next.fullText).length;
     matchingReads = lengthsSettled(length, nextLength) ? matchingReads + 1 : 1;
     content = next;
     length = nextLength;
+  }
+  return { content, textFound: needle ? containsNeedle(content) : undefined };
+}
+
+// The extension returns one chunk per call. With maxChars beyond that, append
+// the following chunks until the cap is reached or the page ends.
+async function extendToMaxChars(
+  tab: BrowserTab,
+  offset: number,
+  content: TabContentExtensionMessage,
+  maxChars: number
+): Promise<TabContentExtensionMessage> {
+  let chunks = 1;
+  while (
+    maxChars > 0 &&
+    content.isTruncated &&
+    chunks < MAX_CHUNKS_PER_READ &&
+    compactText(content.fullText).length < maxChars
+  ) {
+    const next = await fetchTabContent(tab, offset + content.fullText.length, 0);
+    if (!next.fullText) break;
+    content = {
+      ...content,
+      fullText: content.fullText + next.fullText,
+      isTruncated: next.isTruncated,
+      totalLength: next.totalLength,
+    };
+    chunks++;
   }
   return content;
 }
@@ -579,14 +642,21 @@ async function openAndRead(
     const { loaded, tab: loadedTab } = await waitForTabComplete(tabId, opts.timeoutMs);
     if (opts.settleMs > 0) await sleep(opts.settleMs);
 
-    let content: TabContentExtensionMessage;
+    let read: { content: TabContentExtensionMessage; textFound?: boolean };
     try {
-      content = await readWhenStable(loadedTab, opts.offset, opts.maxSettleMs, opts.consentWaitMs);
+      read = await readWhenStable(
+        loadedTab,
+        opts.offset,
+        opts.maxSettleMs,
+        opts.consentWaitMs,
+        opts.waitForText
+      );
     } catch (error) {
       // Keep the tab, so read-tab can pick it up once the user has granted access.
       if (error instanceof ConsentPendingError) keepOpen = true;
       throw error;
     }
+    const content = await extendToMaxChars(loadedTab, opts.offset, read.content, opts.maxChars);
 
     // Title and final URL (after redirects) are often only known after rendering.
     const tab = (await browserApi.getTabList()).find((t) => t.id === tabId) ?? loadedTab;
@@ -594,6 +664,9 @@ async function openAndRead(
     const notes = [
       note,
       loaded ? undefined : `Page had not finished loading after ${opts.timeoutMs} ms; content may be incomplete.`,
+      read.textFound === false
+        ? `"${opts.waitForText}" did not appear within maxSettleMs=${opts.maxSettleMs} ms; returning what the page shows.`
+        : undefined,
       keepOpen ? `Tab stays open as tab id ${tabId}.` : undefined,
     ].filter(Boolean);
     if (notes.length) {
@@ -621,6 +694,7 @@ mcpServer.tool(
     offset: z.number().int().min(0).default(0),
     ...slimParams,
   },
+  READS_WEB,
   async ({ match, tabId, offset, ...opts }) => {
     const tabs = await browserApi.getTabList();
     let tab: BrowserTab | undefined;
@@ -666,7 +740,8 @@ mcpServer.tool(
         text: `Tab ${tab.id} is unloaded (discarded), so a fresh copy was read in a temporary tab.`,
       });
     } else {
-      const content = await fetchTabContent(tab, offset, opts.consentWaitMs);
+      const first = await fetchTabContent(tab, offset, opts.consentWaitMs);
+      const content = await extendToMaxChars(tab, offset, first, opts.maxChars);
       result = formatTabContent(tab, offset, content, opts);
     }
 
@@ -704,8 +779,13 @@ mcpServer.tool(
       .describe("Upper bound for re-reading until the text stops changing (script rendered pages)"),
     timeoutMs: z.number().int().min(1000).max(60_000).default(DEFAULT_LOAD_TIMEOUT_MS),
     closeAfter: z.boolean().default(false).describe("Close the tab again after reading"),
+    waitForText: z
+      .string()
+      .optional()
+      .describe("Read as soon as this text appears on the page (case insensitive) instead of waiting for the text to stop changing. Bounded by maxSettleMs."),
     ...slimParams,
   },
+  OPENS_PAGES,
   async ({ url, ...opts }) => openAndRead(url, { ...opts, offset: 0 })
 );
 

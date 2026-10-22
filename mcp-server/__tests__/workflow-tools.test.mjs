@@ -183,6 +183,17 @@ test("tool list includes the workflow and screenshot tools", async () => {
   }
 });
 
+test("every tool carries read only and destructive annotations", async () => {
+  const tools = Object.fromEntries((await leader.listTools()).tools.map((x) => [x.name, x.annotations]));
+  for (const [name, annotations] of Object.entries(tools)) {
+    assert.equal(typeof annotations?.readOnlyHint, "boolean", name);
+  }
+  assert.equal(tools["read-tab"].readOnlyHint, true);
+  assert.equal(tools["get-list-of-open-tabs"].readOnlyHint, true);
+  assert.equal(tools["open-and-read-tab"].readOnlyHint, false);
+  assert.equal(tools["close-browser-tabs"].destructiveHint, true);
+});
+
 test("read-tab finds tabs by fragment, compacts text and slims links", async () => {
   let res = await leader.callTool({ name: "read-tab", arguments: { match: "rohannayak2" } });
   let text = textOf(res);
@@ -291,6 +302,45 @@ test("get-current-tab and get-tab-metadata work with the stock add-on", async ()
 test("open-browser-tab reports bad URLs as tool errors", async () => {
   const res = await leader.callTool({ name: "open-browser-tab", arguments: { url: "ftp://example.com" } });
   assert.equal(res.isError, true);
+});
+
+test("waitForText keeps reading until the text shows up", async () => {
+  state.commands.length = 0;
+  // Stable page chrome first; the wanted post renders a little later.
+  const chrome = "Navigation and sidebar text. ".repeat(20);
+  state.pages["https://slow.example/feed"] = {
+    text: (reads) => (reads < 3 ? chrome : `${chrome}\nThe Target   Phrase is here`),
+  };
+  let res = await leader.callTool({
+    name: "open-and-read-tab",
+    arguments: { url: "https://slow.example/feed", settleMs: 0, closeAfter: true, waitForText: "target phrase" },
+  });
+  assert.match(textOf(res), /The Target Phrase is here/);
+  assert.ok(count("get-tab-content") >= 3, "did not stop at the stable chrome");
+
+  state.pages["https://slow.example/empty"] = { text: chrome };
+  res = await leader.callTool({
+    name: "open-and-read-tab",
+    arguments: { url: "https://slow.example/empty", settleMs: 0, closeAfter: true, waitForText: "never there", maxSettleMs: 1200 },
+  });
+  assert.match(textOf(res), /"never there" did not appear within maxSettleMs=1200 ms/);
+});
+
+test("maxChars beyond one extension chunk fetches the following chunks", async () => {
+  state.pageCap = 100;
+  try {
+    let res = await leader.callTool({ name: "read-tab", arguments: { tabId: 1, maxChars: 5000 } });
+    let text = textOf(res);
+    assert.match(text, new RegExp(`characters 0-${longText.length} of ${longText.length}`));
+    assert.doesNotMatch(text, /offset=/, "whole page in one call");
+    assert.equal((text.match(/Pocket FM grew a lot\./g) ?? []).length, 30);
+
+    res = await leader.callTool({ name: "read-tab", arguments: { tabId: 1 } });
+    text = textOf(res);
+    assert.match(text, /Page text is truncated\. Call read-tab with tabId=1 and offset=100/);
+  } finally {
+    state.pageCap = 50_000;
+  }
 });
 
 test("a second session forwards through the broker", async () => {
