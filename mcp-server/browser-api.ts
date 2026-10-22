@@ -70,6 +70,8 @@ export interface ContentOptions {
   includeLinks?: boolean;
   format?: "text" | "markdown";
   mainContentOnly?: boolean;
+  selector?: string;
+  excludeSelector?: string;
 }
 
 export interface ExtensionInfo {

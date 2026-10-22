@@ -71,19 +71,28 @@ export function collectSelection(): string {
   return "";
 }
 
-// Markdown of the visible page: headings, paragraphs, lists, links, emphasis,
-// code, quotes and tables. mainContentOnly limits it to <main>, <article> or
-// role=main when the page has one.
-export function pageToMarkdown(mainContentOnly: boolean, inlineLinks: boolean): string {
+// innerText of root without the elements matching exclude (best effort: their
+// text is cut out of the root's text).
+export function visibleText(root: HTMLElement, exclude: string | null): string {
+  let text = root.innerText;
+  if (exclude) {
+    for (const element of Array.from(root.querySelectorAll<HTMLElement>(exclude))) {
+      const part = element.innerText;
+      if (part) text = text.replace(part, "");
+    }
+  }
+  return text;
+}
+
+// Markdown of the visible content of root: headings, paragraphs, lists, links,
+// emphasis, code, quotes and tables, leaving out elements matching exclude.
+export function pageToMarkdown(root: HTMLElement, exclude: string | null, inlineLinks: boolean): string {
   const SKIP = new Set(["SCRIPT", "STYLE", "NOSCRIPT", "TEMPLATE", "SVG", "CANVAS", "IFRAME", "OBJECT", "BUTTON", "SELECT", "INPUT", "TEXTAREA", "HEAD"]);
   const BLOCK = new Set([
     "ADDRESS", "ARTICLE", "ASIDE", "BLOCKQUOTE", "BODY", "DD", "DETAILS", "DIV", "DL", "DT", "FIELDSET", "FIGCAPTION",
     "FIGURE", "FOOTER", "FORM", "H1", "H2", "H3", "H4", "H5", "H6", "HEADER", "HR", "LI", "MAIN", "NAV", "OL", "P",
     "PRE", "SECTION", "SUMMARY", "TABLE", "UL",
   ]);
-  const root =
-    (mainContentOnly && document.querySelector<HTMLElement>("main, article, [role=main]")) || document.body;
-
   const isHidden = (element: Element): boolean => {
     if ((element as HTMLElement).hidden || element.getAttribute("aria-hidden") === "true") return true;
     const checkVisibility = (element as HTMLElement & { checkVisibility?: () => boolean }).checkVisibility;
@@ -91,7 +100,8 @@ export function pageToMarkdown(mainContentOnly: boolean, inlineLinks: boolean): 
     const style = window.getComputedStyle(element);
     return style.display === "none" || style.visibility === "hidden";
   };
-  const skipped = (element: Element) => SKIP.has(element.tagName) || isHidden(element);
+  const skipped = (element: Element) =>
+    SKIP.has(element.tagName) || isHidden(element) || (exclude !== null && element.matches(exclude));
 
   const inline = (node: Node): string => {
     if (node.nodeType === Node.TEXT_NODE) return (node.textContent || "").replace(/\s+/g, " ");

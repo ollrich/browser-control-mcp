@@ -12,6 +12,8 @@ export interface TabContentExtensionMessage extends ExtensionMessageBase {
   links: { url: string; text: string }[];
   // Set by extension 2.0; absent means plain innerText.
   format?: "text" | "markdown";
+  // Extension 2.0: true when selector or excludeSelector were applied.
+  scoped?: boolean;
 }
 
 export interface BrowserTab {

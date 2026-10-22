@@ -105,7 +105,13 @@ function startFakeExtension(port, state) {
         tab.reads = (tab.reads ?? 0) + 1;
         // An own 2.0 build honours format; the stock add-on ignores it.
         const markdown = state.ownBuild && payload.format === "markdown" && tab.markdown !== undefined;
-        const full = markdown ? tab.markdown : typeof tab.text === "function" ? tab.text(tab.reads) : tab.text;
+        const scoped = Boolean(state.ownBuild && payload.selector);
+        if (scoped && !tab.sections?.[payload.selector]) {
+          return fail(`No element matches the selector "${payload.selector}"`);
+        }
+        const full = scoped
+          ? tab.sections[payload.selector]
+          : markdown ? tab.markdown : typeof tab.text === "function" ? tab.text(tab.reads) : tab.text;
         const rest = full.substring(payload.offset ?? 0);
         const page = rest.substring(0, state.pageCap);
         reply({
@@ -116,6 +122,7 @@ function startFakeExtension(port, state) {
           totalLength: full.length,
           links: tab.links ?? [],
           ...(markdown ? { format: "markdown" } : {}),
+          ...(scoped ? { scoped } : {}),
         });
         break;
       }
@@ -499,6 +506,13 @@ test("markdown falls back to text on the stock add-on with a note", async () => 
   assert.match(text, /Bookmarks list/);
 });
 
+test("selectors fall back to the whole page on the stock add-on with a note", async () => {
+  const res = await leader.callTool({ name: "read-tab", arguments: { tabId: 2, selector: "#stats" } });
+  const text = textOf(res);
+  assert.match(text, /Selectors need extension 2\.0; the connected add-on sent the whole page\./);
+  assert.match(text, /Bookmarks list/);
+});
+
 test("extension 2.0 tools explain what they need on the stock add-on", async () => {
   for (const [name, args] of [
     ["read-page-meta", { tabId: 2 }],
@@ -553,6 +567,15 @@ test("extension 2.0 tools work against an own build", async () => {
       (({ format, mainContentOnly }) => ({ format, mainContentOnly }))(state.payloads.find((p) => p.cmd === "get-tab-content")),
       { format: "markdown", mainContentOnly: true }
     );
+
+    karakeep.sections = { "#stats": "42 bookmarks saved" };
+    res = await leader.callTool({ name: "read-tab", arguments: { tabId: 2, selector: "#stats" } });
+    text = textOf(res);
+    assert.match(text, /42 bookmarks saved/);
+    assert.doesNotMatch(text, /Selectors need extension 2\.0/);
+    res = await leader.callTool({ name: "read-tab", arguments: { tabId: 2, selector: "#missing" } });
+    assert.equal(res.isError, true);
+    assert.match(textOf(res), /No element matches the selector "#missing"/);
 
     res = await leader.callTool({ name: "search-bookmarks", arguments: { query: "paper" } });
     assert.match(textOf(res), /title="Paper on tabs", url=https:\/\/papers\.example\/1, folder=Bookmarks Menu \/ Research, added 2026-10-01/);

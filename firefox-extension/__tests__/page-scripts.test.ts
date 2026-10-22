@@ -83,7 +83,13 @@ describe("page scripts", () => {
         <script>ignored()</script>
       </main>`;
 
-    const markdown = new Function(`return (${pageToMarkdown.toString()})(true, true)`)() as string;
+    const run = (root: string, exclude: string | null, links: boolean) =>
+      new Function("root", "exclude", "links", `return (${pageToMarkdown.toString()})(root, exclude, links)`)(
+        document.querySelector(root),
+        exclude,
+        links
+      ) as string;
+    const markdown = run("main", null, true);
 
     expect(markdown).toBe(
       [
@@ -97,8 +103,13 @@ describe("page scripts", () => {
       ].join("\n\n")
     );
 
-    const whole = new Function(`return (${pageToMarkdown.toString()})(false, false)`)() as string;
+    const whole = run("body", null, false);
     expect(whole.startsWith("Menu Home")).toBe(true);
     expect(whole).toContain("Text with a link,");
+
+    const trimmed = run("main", "table, blockquote", true);
+    expect(trimmed).not.toContain("Quoted");
+    expect(trimmed).not.toContain("| Name |");
+    expect(trimmed).toContain("1. First");
   });
 });

@@ -37,6 +37,9 @@ export interface GetTabContentServerMessage extends ServerMessageBase {
   // Extension 2.0, older builds ignore them and send plain text.
   format?: "text" | "markdown";
   mainContentOnly?: boolean;
+  // CSS selectors: read only this element, leave out matching elements.
+  selector?: string;
+  excludeSelector?: string;
 }
 
 export interface ReorderTabsServerMessage extends ServerMessageBase {

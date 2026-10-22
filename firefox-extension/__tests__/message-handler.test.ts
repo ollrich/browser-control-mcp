@@ -695,8 +695,40 @@ describe("MessageHandler", () => {
 
         const code = (browser.tabs.executeScript as jest.Mock).mock.calls[0][1].code as string;
         expect(code).toContain("function pageToMarkdown");
-        expect(code).toContain(")(true, true)");
+        expect(code).toContain('"mainContentOnly":true');
+        expect(code).toContain(")(root, scope.exclude, true)");
         expect((mockClient.sendResourceToServer as jest.Mock).mock.calls[0][0].format).toBe("markdown");
+      });
+
+      it("should scope reading to a selector and report a selector without match", async () => {
+        (browser.tabs.get as jest.Mock).mockResolvedValue({ id: 123, url: "https://example.com" });
+        (browser.permissions.contains as jest.Mock).mockResolvedValue(true);
+        (browser.tabs.executeScript as jest.Mock).mockResolvedValue([
+          { links: [], fullText: "Comments", isTruncated: false, totalLength: 8, scoped: true },
+        ]);
+
+        await messageHandler.handleDecodedMessage({
+          cmd: "get-tab-content",
+          tabId: 123,
+          selector: "#comments",
+          excludeSelector: ".ad",
+          correlationId: "test-correlation-id",
+        });
+
+        const code = (browser.tabs.executeScript as jest.Mock).mock.calls[0][1].code as string;
+        expect(code).toContain('"selector":"#comments","exclude":".ad"');
+        expect(code).toContain("function visibleText");
+        expect((mockClient.sendResourceToServer as jest.Mock).mock.calls[0][0].scoped).toBe(true);
+
+        (browser.tabs.executeScript as jest.Mock).mockResolvedValue([{ missing: true }]);
+        await expect(
+          messageHandler.handleDecodedMessage({
+            cmd: "get-tab-content",
+            tabId: 123,
+            selector: "#nothing",
+            correlationId: "test-correlation-id",
+          })
+        ).rejects.toThrow('No element matches the selector "#nothing"');
       });
 
       it("should skip collecting links when includeLinks is false", async () => {

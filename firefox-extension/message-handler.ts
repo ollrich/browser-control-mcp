@@ -5,7 +5,7 @@ import type {
 import { WebsocketClient } from "./client";
 import { isCommandAllowed, isDomainInDenyList, COMMAND_TO_TOOL_ID, addAuditLogEntry } from "./extension-config";
 import { hasCaptureConsent, markTabAsAwaitingConsent } from "./capture-consent";
-import { collectPageMeta, collectSelection, pageToMarkdown } from "./page-scripts";
+import { collectPageMeta, collectSelection, pageToMarkdown, visibleText } from "./page-scripts";
 
 const MAX_CONTENT_LENGTH = 50_000;
 const MAX_TAB_CONTENT_RESPONSE_LENGTH = 2_000_000;
@@ -52,7 +52,11 @@ export class MessageHandler {
         await this.sendRecentHistory(req.correlationId, req.searchQuery);
         break;
       case "get-tab-content":
-        await this.sendTabsContent(req.correlationId, req.tabId, req.offset, req.includeLinks, req.format, req.mainContentOnly);
+        await this.sendTabsContent(req.correlationId, req.tabId, req.offset, req.includeLinks, req.format, {
+          mainContentOnly: req.mainContentOnly,
+          selector: req.selector,
+          excludeSelector: req.excludeSelector,
+        });
         break;
       case "reorder-tabs":
         await this.reorderTabs(req.correlationId, req.tabOrder);
@@ -263,7 +267,7 @@ export class MessageHandler {
     offset?: number,
     includeLinks = true,
     format: "text" | "markdown" = "text",
-    mainContentOnly = false
+    scope: { mainContentOnly?: boolean; selector?: string; excludeSelector?: string } = {}
   ): Promise<void> {
     const tab = await browser.tabs.get(tabId);
     if (tab.url && (await isDomainInDenyList(tab.url))) {
@@ -283,10 +287,21 @@ export class MessageHandler {
           })).filter(link => link.text !== '' && link.url.startsWith('https://') && !link.url.includes('#'));
         }
 
+        const scope = ${JSON.stringify({
+          selector: scope.selector || null,
+          exclude: scope.excludeSelector || null,
+          mainContentOnly: scope.mainContentOnly === true,
+        })};
+        const root = scope.selector
+          ? document.querySelector(scope.selector)
+          : (scope.mainContentOnly && document.querySelector("main, article, [role=main]")) || document.body;
+        if (!root) {
+          return { missing: true };
+        }
         const source = ${
           format === "markdown"
-            ? `(${pageToMarkdown.toString()})(${mainContentOnly === true}, ${includeLinks !== false})`
-            : "document.body.innerText"
+            ? `(${pageToMarkdown.toString()})(root, scope.exclude, ${includeLinks !== false})`
+            : `(${visibleText.toString()})(root, scope.exclude)`
         };
 
         function getTextContent() {
@@ -308,12 +323,16 @@ export class MessageHandler {
           fullText: textContent.text,
           isTruncated: textContent.isTruncated,
           totalLength: source.length,
-          format: ${JSON.stringify(format)}
+          format: ${JSON.stringify(format)},
+          scoped: Boolean(scope.selector || scope.exclude)
         };
       })();
     `,
     });
-    const { isTruncated, fullText, links, totalLength } = results[0];
+    if (results[0]?.missing) {
+      throw new Error(`No element matches the selector "${scope.selector}"`);
+    }
+    const { isTruncated, fullText, links, totalLength, scoped } = results[0];
     const message = this.truncateTabContentMessage({
       resource: "tab-content",
       tabId,
@@ -323,6 +342,7 @@ export class MessageHandler {
       links,
       totalLength,
       format,
+      ...(scoped ? { scoped } : {}),
     });
     await this.client.sendResourceToServer(message);
   }

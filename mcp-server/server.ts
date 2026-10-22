@@ -453,7 +453,15 @@ const slimParams = {
   mainContentOnly: z
     .boolean()
     .default(false)
-    .describe("With markdown: only the page's main or article element, without menus and footers (extension 2.0)"),
+    .describe("Only the page's main or article element, without menus and footers (extension 2.0)"),
+  selector: z
+    .string()
+    .optional()
+    .describe("CSS selector: read only this element, e.g. '#comments' or 'article' (extension 2.0)"),
+  excludeSelector: z
+    .string()
+    .optional()
+    .describe("CSS selector of elements to leave out, e.g. 'aside, .ads' (extension 2.0)"),
   redactPersonalData: z
     .boolean()
     .default(false)
@@ -468,6 +476,8 @@ interface SlimReadOptions {
   format: "text" | "markdown";
   mainContentOnly: boolean;
   redactPersonalData: boolean;
+  selector?: string;
+  excludeSelector?: string;
 }
 
 // Only send the optional fields that differ from the plain text default.
@@ -476,6 +486,8 @@ function contentOptions(opts: SlimReadOptions): ContentOptions {
     includeLinks: opts.includeLinks,
     ...(opts.format === "markdown" ? { format: "markdown" as const } : {}),
     ...(opts.mainContentOnly ? { mainContentOnly: true } : {}),
+    ...(opts.selector ? { selector: opts.selector } : {}),
+    ...(opts.excludeSelector ? { excludeSelector: opts.excludeSelector } : {}),
   };
 }
 
@@ -701,6 +713,9 @@ function formatTabContent(
   if (opts.format === "markdown" && !markdown) {
     notes.push("Markdown needs extension 2.0; the connected add-on sent plain text.");
   }
+  if ((opts.selector || opts.excludeSelector) && !content.scoped) {
+    notes.push("Selectors need extension 2.0; the connected add-on sent the whole page.");
+  }
   if (opts.includeLinks && slim.droppedLinks > 0) {
     notes.push(`${slim.droppedLinks} duplicate or surplus links omitted.`);
   }
@@ -919,6 +934,7 @@ registerTool(
     consentWaitMs: slimParams.consentWaitMs,
     format: slimParams.format,
     mainContentOnly: slimParams.mainContentOnly,
+    excludeSelector: slimParams.excludeSelector,
     redactPersonalData: slimParams.redactPersonalData,
   },
   READS_WEB,
