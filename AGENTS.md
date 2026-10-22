@@ -24,7 +24,7 @@ Per project: `cd mcp-server && npm test` (builds first) or `cd firefox-extension
 
 `mcp-server/__tests__/workflow-tools.test.mjs` is the key test: it runs real server processes against a fake extension that behaves like the stock add-on from addons.mozilla.org.
 
-Do not ship the DXT from `npm run pack-dxt` as is: it bundles dev dependencies and the `common` link. Stage `manifest.json`, `dist/`, `LICENSE` and a `package.json` without `@browser-control-mcp/common`, run `npm install --omit=dev` there, then validate and pack.
+`cd mcp-server && npm run pack-dxt` builds the Claude Desktop extension: it stages a runtime only copy, starts it once to check version and tool list against `manifest.json`, then validates and packs `firefox-control-<version>.dxt`. Keep the version in `package.json` and `manifest.json` equal, and list every tool in `manifest.json`.
 
 ## Rules
 
