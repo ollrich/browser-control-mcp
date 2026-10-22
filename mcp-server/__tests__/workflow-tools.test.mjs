@@ -563,6 +563,31 @@ test("extension 2.0 tools work against an own build", async () => {
   }
 });
 
+test("open-and-read-tabs reads several URLs, closes them and reports failures", async () => {
+  state.pages["https://one.example"] = { text: "First page, write to team@one.example" };
+  state.pages["https://two.example"] = { text: "Second page, call +49 30 1234567" };
+  const tabCount = state.tabs.length;
+  state.payloads.length = 0;
+
+  const res = await leader.callTool({
+    name: "open-and-read-tabs",
+    arguments: { urls: ["one.example", "https://two.example", "ftp://three.example"], settleMs: 0, redactPersonalData: true },
+  });
+  const text = textOf(res);
+  assert.match(text, /^Read 2 of 3 pages, up to 13333 characters each\./);
+  assert.match(text, /First page, write to \[email\]/);
+  assert.match(text, /Second page, call \[phone\]/);
+  assert.match(text, /ftp:\/\/three\.example: Only https URLs can be opened/);
+  assert.equal(state.tabs.length, tabCount, "all tabs closed again");
+  assert.ok(state.payloads.filter((p) => p.cmd === "open-tab").every((p) => p.active === false), "opened in the background");
+});
+
+test("search-tab can mask personal data in snippets", async () => {
+  state.tabs.push({ id: 9, url: "https://contact.example", title: "Contact", lastAccessed: 1, status: "complete", text: "Reach Anna at anna@contact.example today." });
+  const res = await leader.callTool({ name: "search-tab", arguments: { tabId: 9, query: "anna", redactPersonalData: true } });
+  assert.match(textOf(res), /«Anna» at \[email\]/);
+});
+
 test("a second session forwards through the broker", async () => {
   const forwarder = await startClient(port, home);
   try {

@@ -169,3 +169,22 @@ test("isConsentTabFor recognizes the extension's consent page by origin", () => 
   assert.equal(isConsentTabFor({ id: 1, url: "https://a.example" }, "https://a.example"), false);
   assert.equal(isConsentTabFor(consent, undefined), false);
 });
+
+test("redactPersonalData masks contact and payment data but keeps ordinary numbers", () => {
+  const { redactPersonalData } = utils;
+  const text = [
+    "Mail max.mustermann+news@example.co.uk or info@firma.de.",
+    "Call +49 30 1234567, 0049 89/123456 or 030 1234567.",
+    "IBAN DE89 3704 0044 0532 0130 00 and card 4111 1111 1111 1111.",
+    "Not a card: 1234 5678 9012 3456. Date 22.10.2026, price 19,99 EUR, order 2026-10-22, year 1990.",
+  ].join("\n");
+  assert.equal(
+    redactPersonalData(text),
+    [
+      "Mail [email] or [email].",
+      "Call [phone], [phone] or [phone].",
+      "IBAN [iban] and card [card].",
+      "Not a card: 1234 5678 9012 3456. Date 22.10.2026, price 19,99 EUR, order 2026-10-22, year 1990.",
+    ].join("\n")
+  );
+});

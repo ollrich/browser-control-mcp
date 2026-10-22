@@ -68,6 +68,10 @@
             "description": "Open a URL, wait until rendered, return its text in one call"
         },
         {
+            "name": "open-and-read-tabs",
+            "description": "Open several URLs in background tabs, read and close them in one call"
+        },
+        {
             "name": "read-tabs",
             "description": "Read several open tabs in one call, failures reported per tab"
         },

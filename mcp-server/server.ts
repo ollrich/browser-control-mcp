@@ -16,9 +16,11 @@ import {
   findSnippets,
   formatTabLine,
   isConsentTabFor,
+  markPhrases,
   matchTabs,
   normalizeOpenUrl,
   pickActiveTab,
+  redactPersonalData,
   slimContent,
   tabFlags,
 } from "./content-utils";
@@ -452,6 +454,10 @@ const slimParams = {
     .boolean()
     .default(false)
     .describe("With markdown: only the page's main or article element, without menus and footers (extension 2.0)"),
+  redactPersonalData: z
+    .boolean()
+    .default(false)
+    .describe("Mask e-mail addresses, phone numbers, IBANs and card numbers in the returned text"),
 };
 
 interface SlimReadOptions {
@@ -461,6 +467,7 @@ interface SlimReadOptions {
   consentWaitMs: number;
   format: "text" | "markdown";
   mainContentOnly: boolean;
+  redactPersonalData: boolean;
 }
 
 // Only send the optional fields that differ from the plain text default.
@@ -700,11 +707,12 @@ function formatTabContent(
 
   const result: TextContent[] = [header];
   if (notes.length) result.push({ type: "text", text: notes.join(" ") });
-  result.push({ type: "text", text: slim.text });
+  const redact = (text: string) => (opts.redactPersonalData ? redactPersonalData(text) : text);
+  result.push({ type: "text", text: redact(slim.text) });
   if (slim.links.length) {
     result.push({
       type: "text",
-      text: "Links:\n" + slim.links.map((l) => `- ${l.text} <${l.url}>`).join("\n"),
+      text: "Links:\n" + slim.links.map((l) => `- ${redact(l.text)} <${l.url}>`).join("\n"),
     });
   }
   return result;
@@ -911,6 +919,7 @@ registerTool(
     consentWaitMs: slimParams.consentWaitMs,
     format: slimParams.format,
     mainContentOnly: slimParams.mainContentOnly,
+    redactPersonalData: slimParams.redactPersonalData,
   },
   READS_WEB,
   async ({ matches = [], tabIds = [], maxCharsPerTab, ...opts }) => {
@@ -969,9 +978,10 @@ registerTool(
     contextChars: z.number().int().min(20).max(2000).default(200).describe("Characters shown before and after each hit"),
     maxResults: z.number().int().min(1).max(100).default(10),
     consentWaitMs: slimParams.consentWaitMs,
+    redactPersonalData: slimParams.redactPersonalData,
   },
   READS_WEB,
-  async ({ query, match, tabId, contextChars, maxResults, consentWaitMs }) => {
+  async ({ query, match, tabId, contextChars, maxResults, consentWaitMs, redactPersonalData: redact }) => {
     const { tab, missing } = selectTab(await browserApi.getTabList(), match, tabId);
     if (!tab) return missing;
 
@@ -1000,9 +1010,63 @@ registerTool(
     if (found.snippets.length) {
       content.push({
         type: "text",
-        text: found.snippets.map((snippet) => `[offset ${snippet.offset}] ${snippet.text}`).join("\n\n"),
+        text: found.snippets
+          // Markers inside an address would hide it from redaction: redact the plain text, then mark again.
+          .map((snippet) => {
+            const text = redact ? markPhrases(redactPersonalData(snippet.text.replace(/[«»]/g, "")), phrases) : snippet.text;
+            return `[offset ${snippet.offset}] ${text}`;
+          })
+          .join("\n\n"),
       });
     }
+    return { content };
+  }
+);
+
+registerTool(
+  "open-and-read-tabs",
+  `Open several https URLs one after another in background tabs, read each once it has
+   rendered and close it again. The character budget is shared evenly; a page that fails
+   is reported without stopping the others. Use instead of repeated open-and-read-tab calls.`,
+  {
+    urls: z.array(z.string()).min(1).max(10),
+    maxCharsPerPage: z
+      .number()
+      .int()
+      .min(500)
+      .max(50_000)
+      .optional()
+      .describe(`Default: ${DEFAULT_MAX_CHARS} split evenly, at least 2000 per page`),
+    keepOpen: z.boolean().default(false).describe("Leave the tabs open, e.g. to read on with read-tab"),
+    settleMs: z.number().int().min(0).max(15_000).default(DEFAULT_SETTLE_MS),
+    maxSettleMs: z.number().int().min(0).max(30_000).default(DEFAULT_MAX_SETTLE_MS),
+    timeoutMs: z.number().int().min(1000).max(60_000).default(DEFAULT_LOAD_TIMEOUT_MS),
+    includeLinks: slimParams.includeLinks,
+    maxLinks: slimParams.maxLinks,
+    consentWaitMs: slimParams.consentWaitMs,
+    format: slimParams.format,
+    mainContentOnly: slimParams.mainContentOnly,
+    redactPersonalData: slimParams.redactPersonalData,
+  },
+  OPENS_PAGES,
+  async ({ urls, maxCharsPerPage, keepOpen, ...opts }) => {
+    const maxChars = maxCharsPerPage ?? Math.max(2000, Math.floor(DEFAULT_MAX_CHARS / urls.length));
+    const content: TextContent[] = [];
+    let failed = 0;
+    for (const url of urls) {
+      try {
+        const page = await openAndRead(url, { ...opts, maxChars, offset: 0, closeAfter: !keepOpen, background: true });
+        if (page.isError) failed++;
+        content.push(...page.content);
+      } catch (error) {
+        failed++;
+        content.push({ type: "text", text: `${url}: ${errorText(error)}` });
+      }
+    }
+    content.unshift({
+      type: "text",
+      text: `Read ${urls.length - failed} of ${urls.length} pages, up to ${maxChars} characters each.`,
+    });
     return { content };
   }
 );

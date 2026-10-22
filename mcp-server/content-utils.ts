@@ -356,3 +356,41 @@ export function isConsentTabFor(tab: BrowserTab, pageUrl: string | undefined): b
     return false;
   }
 }
+
+function passesLuhn(digits: string): boolean {
+  let sum = 0;
+  for (let i = 0; i < digits.length; i++) {
+    let digit = Number(digits[digits.length - 1 - i]);
+    if (i % 2 === 1) {
+      digit *= 2;
+      if (digit > 9) digit -= 9;
+    }
+    sum += digit;
+  }
+  return sum % 10 === 0;
+}
+
+/**
+ * Mask personal data in text handed to the model: e-mail addresses, IBANs,
+ * card numbers (Luhn checked) and phone numbers in international (+49, 0049)
+ * or German (0 plus area code) notation. Deliberately conservative: dates,
+ * prices and plain numbers stay.
+ */
+export function redactPersonalData(text: string): string {
+  return text
+    .replace(/[\w.+-]+@[\w-]+(?:\.[\w-]+)+/g, "[email]")
+    .replace(/\b[A-Z]{2}\d{2}(?: ?[A-Z0-9]{4}){3,7}(?: ?[A-Z0-9]{1,3})?\b/g, "[iban]")
+    .replace(/\b(?:\d[ -]?){12,18}\d\b/g, (match) =>
+      passesLuhn(match.replace(/\D/g, "")) ? "[card]" : match
+    )
+    .replace(/(?:\+|\b00)\d{1,3}[ /.-]?\(?\d{1,5}\)?(?:[ /.-]?\d{2,}){1,4}\b/g, "[phone]")
+    .replace(/\b0\d{2,5}[ /-]\d{3,}(?:[ -]\d{2,})*\b/g, "[phone]");
+}
+
+/** Mark phrase hits with «» again, e.g. after the snippet text was redacted. */
+export function markPhrases(text: string, phrases: string[]): string {
+  return phrases.reduce((marked, phrase) => {
+    const pattern = phrasePattern(phrase);
+    return pattern ? marked.replace(pattern, "«$&»") : marked;
+  }, text);
+}
