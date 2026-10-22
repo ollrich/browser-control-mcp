@@ -70,3 +70,127 @@ export function collectSelection(): string {
   }
   return "";
 }
+
+// Markdown of the visible page: headings, paragraphs, lists, links, emphasis,
+// code, quotes and tables. mainContentOnly limits it to <main>, <article> or
+// role=main when the page has one.
+export function pageToMarkdown(mainContentOnly: boolean, inlineLinks: boolean): string {
+  const SKIP = new Set(["SCRIPT", "STYLE", "NOSCRIPT", "TEMPLATE", "SVG", "CANVAS", "IFRAME", "OBJECT", "BUTTON", "SELECT", "INPUT", "TEXTAREA", "HEAD"]);
+  const BLOCK = new Set([
+    "ADDRESS", "ARTICLE", "ASIDE", "BLOCKQUOTE", "BODY", "DD", "DETAILS", "DIV", "DL", "DT", "FIELDSET", "FIGCAPTION",
+    "FIGURE", "FOOTER", "FORM", "H1", "H2", "H3", "H4", "H5", "H6", "HEADER", "HR", "LI", "MAIN", "NAV", "OL", "P",
+    "PRE", "SECTION", "SUMMARY", "TABLE", "UL",
+  ]);
+  const root =
+    (mainContentOnly && document.querySelector<HTMLElement>("main, article, [role=main]")) || document.body;
+
+  const isHidden = (element: Element): boolean => {
+    if ((element as HTMLElement).hidden || element.getAttribute("aria-hidden") === "true") return true;
+    const checkVisibility = (element as HTMLElement & { checkVisibility?: () => boolean }).checkVisibility;
+    if (typeof checkVisibility === "function") return !checkVisibility.call(element);
+    const style = window.getComputedStyle(element);
+    return style.display === "none" || style.visibility === "hidden";
+  };
+  const skipped = (element: Element) => SKIP.has(element.tagName) || isHidden(element);
+
+  const inline = (node: Node): string => {
+    if (node.nodeType === Node.TEXT_NODE) return (node.textContent || "").replace(/\s+/g, " ");
+    if (node.nodeType !== Node.ELEMENT_NODE) return "";
+    const element = node as HTMLElement;
+    if (skipped(element)) return "";
+    const inner = () => Array.from(element.childNodes).map(inline).join("");
+    switch (element.tagName) {
+      case "BR":
+        return "\n";
+      case "A": {
+        const text = inner().trim();
+        const href = (element as HTMLAnchorElement).href;
+        return inlineLinks && text && /^https?:/.test(href) ? `[${text}](${href})` : text;
+      }
+      case "STRONG":
+      case "B": {
+        const text = inner().trim();
+        return text ? `**${text}**` : "";
+      }
+      case "EM":
+      case "I": {
+        const text = inner().trim();
+        return text ? `*${text}*` : "";
+      }
+      case "CODE": {
+        const text = element.textContent || "";
+        return text ? `\`${text}\`` : "";
+      }
+      case "IMG": {
+        const alt = element.getAttribute("alt")?.trim();
+        return alt ? `[image: ${alt}]` : "";
+      }
+      default:
+        return inner();
+    }
+  };
+
+  const blocks: string[] = [];
+  const push = (text: string, quote: string, keepLines = false) => {
+    const lines = text.split("\n").map((line) => (keepLines ? line.replace(/\s+$/, "") : line.trim()));
+    const joined = (keepLines ? lines.join("\n") : lines.join("\n").replace(/\n{2,}/g, "\n")).trim();
+    if (joined) blocks.push(quote ? joined.split("\n").map((line) => quote + line).join("\n") : joined);
+  };
+
+  const listLines = (list: HTMLElement, depth: number): string[] => {
+    const lines: string[] = [];
+    let number = 1;
+    for (const item of Array.from(list.children)) {
+      if (item.tagName !== "LI" || skipped(item)) continue;
+      const nested: HTMLElement[] = [];
+      let text = "";
+      for (const child of Array.from(item.childNodes)) {
+        const tag = (child as Element).tagName;
+        if (tag === "UL" || tag === "OL") nested.push(child as HTMLElement);
+        else text += inline(child);
+      }
+      const marker = list.tagName === "OL" ? `${number++}.` : "-";
+      lines.push(`${"  ".repeat(depth)}${marker} ${text.replace(/\s+/g, " ").trim()}`);
+      for (const sublist of nested) lines.push(...listLines(sublist, depth + 1));
+    }
+    return lines;
+  };
+
+  const tableMarkdown = (table: HTMLElement): string => {
+    const rows = Array.from(table.querySelectorAll("tr")).map((row) =>
+      Array.from(row.children)
+        .filter((cell) => cell.tagName === "TD" || cell.tagName === "TH")
+        .map((cell) => inline(cell).replace(/\s+/g, " ").replace(/\|/g, "\\|").trim())
+    );
+    if (!rows.length) return "";
+    const width = Math.max(...rows.map((row) => row.length));
+    const line = (row: string[]) => `| ${Array.from({ length: width }, (_, i) => row[i] ?? "").join(" | ")} |`;
+    return [line(rows[0]), `| ${Array(width).fill("---").join(" | ")} |`, ...rows.slice(1).map(line)].join("\n");
+  };
+
+  const walk = (element: HTMLElement, quote: string) => {
+    if (skipped(element)) return;
+    const tag = element.tagName;
+    if (/^H[1-6]$/.test(tag)) return push(`${"#".repeat(Number(tag[1]))} ${inline(element).replace(/\s+/g, " ")}`, quote);
+    if (tag === "PRE") return push(`\`\`\`\n${(element.textContent || "").replace(/\n+$/, "")}\n\`\`\``, quote, true);
+    if (tag === "HR") return push("---", quote);
+    if (tag === "UL" || tag === "OL") return push(listLines(element, 0).join("\n"), quote, true);
+    if (tag === "TABLE") return push(tableMarkdown(element), quote, true);
+    const innerQuote = tag === "BLOCKQUOTE" ? `${quote}> ` : quote;
+
+    let run = "";
+    for (const child of Array.from(element.childNodes)) {
+      if (child.nodeType === Node.ELEMENT_NODE && BLOCK.has((child as Element).tagName)) {
+        push(run, innerQuote);
+        run = "";
+        walk(child as HTMLElement, innerQuote);
+      } else {
+        run += inline(child);
+      }
+    }
+    push(run, innerQuote);
+  };
+
+  walk(root, "");
+  return blocks.join("\n\n");
+}

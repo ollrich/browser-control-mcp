@@ -65,6 +65,13 @@ export function buildPortInUseMessage(port: number): string {
   );
 }
 
+// Optional get-tab-content fields of extension 2.0; the stock add-on ignores them.
+export interface ContentOptions {
+  includeLinks?: boolean;
+  format?: "text" | "markdown";
+  mainContentOnly?: boolean;
+}
+
 export interface ExtensionInfo {
   version: string;
   commands: string[];
@@ -212,14 +219,14 @@ export class BrowserAPI {
   async getTabContent(
     tabId: number,
     offset: number,
-    includeLinks?: boolean
+    options: ContentOptions = {}
   ): Promise<TabContentExtensionMessage> {
-    return this.run("getTabContent", [tabId, offset, includeLinks], async () => {
+    return this.run("getTabContent", [tabId, offset, options], async () => {
       const correlationId = await this.sendMessageToExtension({
         cmd: "get-tab-content",
         tabId,
         offset,
-        ...(includeLinks === undefined ? {} : { includeLinks }),
+        ...options,
       });
       return await this.waitForResponse(correlationId, "tab-content");
     });
@@ -569,7 +576,12 @@ export class BrowserAPI {
       case "getBrowserRecentHistory":
         return await this.getBrowserRecentHistory(args[0] as string | undefined);
       case "getTabContent":
-        return await this.getTabContent(args[0] as number, args[1] as number, args[2] as boolean | undefined);
+        // Sessions of the previous release forwarded a bare includeLinks flag.
+        return await this.getTabContent(
+          args[0] as number,
+          args[1] as number,
+          typeof args[2] === "boolean" ? { includeLinks: args[2] } : (args[2] as ContentOptions | undefined)
+        );
       case "reorderTabs":
         return await this.reorderTabs(args[0] as number[]);
       case "findHighlight":

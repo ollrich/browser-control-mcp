@@ -34,6 +34,9 @@ export interface GetTabContentServerMessage extends ServerMessageBase {
   offset?: number;
   // false skips collecting links. Extension 2.0; older builds ignore it.
   includeLinks?: boolean;
+  // Extension 2.0, older builds ignore them and send plain text.
+  format?: "text" | "markdown";
+  mainContentOnly?: boolean;
 }
 
 export interface ReorderTabsServerMessage extends ServerMessageBase {

@@ -10,6 +10,8 @@ export interface TabContentExtensionMessage extends ExtensionMessageBase {
   isTruncated: boolean;
   totalLength: number;
   links: { url: string; text: string }[];
+  // Set by extension 2.0; absent means plain innerText.
+  format?: "text" | "markdown";
 }
 
 export interface BrowserTab {

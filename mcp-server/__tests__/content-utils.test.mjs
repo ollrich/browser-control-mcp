@@ -15,7 +15,16 @@ const {
   findSnippets,
   filterTabs,
   tabFlags,
+  compactMarkdown,
 } = utils;
+
+test("compactMarkdown keeps indentation but drops trailing spaces and blank runs", () => {
+  const markdown = "# T  \r\n\n\n\n- a\n  - b   \n\n```\n    code\n```  ";
+  assert.equal(compactMarkdown(markdown), "# T\n\n- a\n  - b\n\n```\n    code\n```");
+  const res = slimContent(markdown, [], { includeLinks: false, maxLinks: 0, maxChars: 8, compact: compactMarkdown });
+  assert.equal(res.text, "# T\n\n- a");
+  assert.equal(compactMarkdown(markdown.slice(0, res.rawConsumed)), "# T\n\n- a");
+});
 
 test("findSnippets marks hits, merges close ones and keeps raw offsets", () => {
   const raw = "Intro text.\n\nThe Green   Party met. Later the green party voted.\n" + "x".repeat(500) + " green party again";

@@ -1,4 +1,4 @@
-import { collectPageMeta, collectSelection } from "../page-scripts";
+import { collectPageMeta, collectSelection, pageToMarkdown } from "../page-scripts";
 
 // The extension injects these functions as source text, so run them that way too.
 function runInjected<T>(fn: () => T): T {
@@ -64,5 +64,41 @@ describe("page scripts", () => {
     password.focus();
     password.setSelectionRange(0, 6);
     expect(runInjected(collectSelection)).toBe("");
+  });
+
+  it("converts the visible page to markdown from injected source", () => {
+    document.body.innerHTML = `
+      <nav>Menu <a href="https://example.com/home">Home</a></nav>
+      <main>
+        <h1>Main   title</h1>
+        <p>Text with <a href="https://example.com/x">a link</a>, <strong>bold</strong> and <code>code()</code>.<br>Next line</p>
+        <div style="display:none">hidden text</div>
+        <ul><li>One<ul><li>Nested</li></ul></li><li>Two</li></ul>
+        <ol><li>First</li><li>Second</li></ol>
+        <blockquote><p>Quoted</p></blockquote>
+        <pre>  indented()
+
+  more()</pre>
+        <table><tr><th>Name</th><th>Value</th></tr><tr><td>a|b</td><td>1</td></tr></table>
+        <script>ignored()</script>
+      </main>`;
+
+    const markdown = new Function(`return (${pageToMarkdown.toString()})(true, true)`)() as string;
+
+    expect(markdown).toBe(
+      [
+        "# Main title",
+        "Text with [a link](https://example.com/x), **bold** and `code()`.\nNext line",
+        "- One\n  - Nested\n- Two",
+        "1. First\n2. Second",
+        "> Quoted",
+        "```\n  indented()\n\n  more()\n```",
+        "| Name | Value |\n| --- | --- |\n| a\\|b | 1 |",
+      ].join("\n\n")
+    );
+
+    const whole = new Function(`return (${pageToMarkdown.toString()})(false, false)`)() as string;
+    expect(whole.startsWith("Menu Home")).toBe(true);
+    expect(whole).toContain("Text with a link,");
   });
 });

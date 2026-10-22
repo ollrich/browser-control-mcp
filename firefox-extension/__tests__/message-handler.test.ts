@@ -444,6 +444,7 @@ describe("MessageHandler", () => {
           fullText: "Page content",
           links: [{ url: "https://example.com/page", text: "Page" }],
           totalLength: 12,
+          format: "text",
         });
       });
 
@@ -675,6 +676,27 @@ describe("MessageHandler", () => {
         });
 
         expect(browser.tabs.create).toHaveBeenCalledWith({ url: "https://example.com", active: false });
+      });
+
+      it("should convert the page to markdown when asked", async () => {
+        (browser.tabs.get as jest.Mock).mockResolvedValue({ id: 123, url: "https://example.com" });
+        (browser.permissions.contains as jest.Mock).mockResolvedValue(true);
+        (browser.tabs.executeScript as jest.Mock).mockResolvedValue([
+          { links: [], fullText: "# Title", isTruncated: false, totalLength: 7 },
+        ]);
+
+        await messageHandler.handleDecodedMessage({
+          cmd: "get-tab-content",
+          tabId: 123,
+          format: "markdown",
+          mainContentOnly: true,
+          correlationId: "test-correlation-id",
+        });
+
+        const code = (browser.tabs.executeScript as jest.Mock).mock.calls[0][1].code as string;
+        expect(code).toContain("function pageToMarkdown");
+        expect(code).toContain(")(true, true)");
+        expect((mockClient.sendResourceToServer as jest.Mock).mock.calls[0][0].format).toBe("markdown");
       });
 
       it("should skip collecting links when includeLinks is false", async () => {

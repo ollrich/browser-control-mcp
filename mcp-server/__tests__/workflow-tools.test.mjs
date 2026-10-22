@@ -103,7 +103,9 @@ function startFakeExtension(port, state) {
           return fail(consentMessage(origin));
         }
         tab.reads = (tab.reads ?? 0) + 1;
-        const full = typeof tab.text === "function" ? tab.text(tab.reads) : tab.text;
+        // An own 2.0 build honours format; the stock add-on ignores it.
+        const markdown = state.ownBuild && payload.format === "markdown" && tab.markdown !== undefined;
+        const full = markdown ? tab.markdown : typeof tab.text === "function" ? tab.text(tab.reads) : tab.text;
         const rest = full.substring(payload.offset ?? 0);
         const page = rest.substring(0, state.pageCap);
         reply({
@@ -113,6 +115,7 @@ function startFakeExtension(port, state) {
           isTruncated: rest.length > page.length,
           totalLength: full.length,
           links: tab.links ?? [],
+          ...(markdown ? { format: "markdown" } : {}),
         });
         break;
       }
@@ -489,6 +492,13 @@ test("temporary tabs open in the background and links are only requested when wa
   assert.equal(state.payloads.find((p) => p.cmd === "open-tab").active, undefined, "kept tabs open in front");
 });
 
+test("markdown falls back to text on the stock add-on with a note", async () => {
+  const res = await leader.callTool({ name: "read-tab", arguments: { tabId: 2, format: "markdown" } });
+  const text = textOf(res);
+  assert.match(text, /Markdown needs extension 2\.0; the connected add-on sent plain text\./);
+  assert.match(text, /Bookmarks list/);
+});
+
 test("extension 2.0 tools explain what they need on the stock add-on", async () => {
   for (const [name, args] of [
     ["read-page-meta", { tabId: 2 }],
@@ -532,6 +542,17 @@ test("extension 2.0 tools work against an own build", async () => {
 
     res = await leader.callTool({ name: "read-selection", arguments: { tabId: 2 } });
     assert.match(textOf(res), /marked words/);
+
+    karakeep.markdown = "# Dashboard\n\n- Saved\n  - Nested   item\n\n```\n  indented()\n```";
+    state.payloads.length = 0;
+    res = await leader.callTool({ name: "read-tab", arguments: { tabId: 2, format: "markdown", mainContentOnly: true } });
+    text = textOf(res);
+    assert.match(text, /# Dashboard\n\n- Saved\n  - Nested   item\n\n```\n  indented\(\)\n```/, "indentation kept");
+    assert.doesNotMatch(text, /Markdown needs extension 2\.0/);
+    assert.deepEqual(
+      (({ format, mainContentOnly }) => ({ format, mainContentOnly }))(state.payloads.find((p) => p.cmd === "get-tab-content")),
+      { format: "markdown", mainContentOnly: true }
+    );
 
     res = await leader.callTool({ name: "search-bookmarks", arguments: { query: "paper" } });
     assert.match(textOf(res), /title="Paper on tabs", url=https:\/\/papers\.example\/1, folder=Bookmarks Menu \/ Research, added 2026-10-01/);

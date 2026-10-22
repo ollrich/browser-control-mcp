@@ -10,6 +10,8 @@ export interface SlimOptions {
   maxLinks: number;
   maxChars: number;
   pageUrl?: string;
+  // Defaults to compactText; markdown needs its indentation kept.
+  compact?: (text: string) => string;
 }
 
 export interface SlimResult {
@@ -35,6 +37,15 @@ export function compactText(text: string): string {
     .trim();
 }
 
+/** Lighter cleanup for markdown: keeps indentation of lists and code. */
+export function compactMarkdown(text: string): string {
+  return text
+    .replace(/\r\n?/g, "\n")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
 /**
  * Raw prefix length that covers the first `compactLength` characters of the
  * compacted text, ending right after its last non-whitespace character so that
@@ -42,8 +53,12 @@ export function compactText(text: string): string {
  * prefix of the compacted whole (minus trailing whitespace), so the lengths grow
  * monotonically and a binary search finds the boundary.
  */
-export function rawLengthForCompactPrefix(raw: string, compactLength: number): number {
-  const target = compactText(raw).slice(0, compactLength).trimEnd().length;
+export function rawLengthForCompactPrefix(
+  raw: string,
+  compactLength: number,
+  compact: (text: string) => string = compactText
+): number {
+  const target = compact(raw).slice(0, compactLength).trimEnd().length;
   if (target === 0) {
     return 0;
   }
@@ -51,7 +66,7 @@ export function rawLengthForCompactPrefix(raw: string, compactLength: number): n
   let high = raw.length;
   while (low < high) {
     const mid = (low + high) >> 1;
-    if (compactText(raw.slice(0, mid)).length >= target) {
+    if (compact(raw.slice(0, mid)).length >= target) {
       high = mid;
     } else {
       low = mid + 1;
@@ -99,13 +114,14 @@ export function slimContent(
   links: PageLink[],
   options: SlimOptions
 ): SlimResult {
-  let text = compactText(fullText);
+  const compact = options.compact ?? compactText;
+  let text = compact(fullText);
   let cutByMaxChars = false;
   let rawConsumed = fullText.length;
   if (options.maxChars > 0 && text.length > options.maxChars) {
     text = text.slice(0, options.maxChars);
     cutByMaxChars = true;
-    rawConsumed = rawLengthForCompactPrefix(fullText, options.maxChars);
+    rawConsumed = rawLengthForCompactPrefix(fullText, options.maxChars, compact);
   }
 
   if (!options.includeLinks) {

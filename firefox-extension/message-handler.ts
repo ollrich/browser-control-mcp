@@ -5,7 +5,7 @@ import type {
 import { WebsocketClient } from "./client";
 import { isCommandAllowed, isDomainInDenyList, COMMAND_TO_TOOL_ID, addAuditLogEntry } from "./extension-config";
 import { hasCaptureConsent, markTabAsAwaitingConsent } from "./capture-consent";
-import { collectPageMeta, collectSelection } from "./page-scripts";
+import { collectPageMeta, collectSelection, pageToMarkdown } from "./page-scripts";
 
 const MAX_CONTENT_LENGTH = 50_000;
 const MAX_TAB_CONTENT_RESPONSE_LENGTH = 2_000_000;
@@ -52,7 +52,7 @@ export class MessageHandler {
         await this.sendRecentHistory(req.correlationId, req.searchQuery);
         break;
       case "get-tab-content":
-        await this.sendTabsContent(req.correlationId, req.tabId, req.offset, req.includeLinks);
+        await this.sendTabsContent(req.correlationId, req.tabId, req.offset, req.includeLinks, req.format, req.mainContentOnly);
         break;
       case "reorder-tabs":
         await this.reorderTabs(req.correlationId, req.tabOrder);
@@ -261,7 +261,9 @@ export class MessageHandler {
     correlationId: string,
     tabId: number,
     offset?: number,
-    includeLinks = true
+    includeLinks = true,
+    format: "text" | "markdown" = "text",
+    mainContentOnly = false
   ): Promise<void> {
     const tab = await browser.tabs.get(tabId);
     if (tab.url && (await isDomainInDenyList(tab.url))) {
@@ -281,9 +283,15 @@ export class MessageHandler {
           })).filter(link => link.text !== '' && link.url.startsWith('https://') && !link.url.includes('#'));
         }
 
+        const source = ${
+          format === "markdown"
+            ? `(${pageToMarkdown.toString()})(${mainContentOnly === true}, ${includeLinks !== false})`
+            : "document.body.innerText"
+        };
+
         function getTextContent() {
           let isTruncated = false;
-          let text = document.body.innerText.substring(${Number(offset) || 0});
+          let text = source.substring(${Number(offset) || 0});
           if (text.length > ${MAX_CONTENT_LENGTH}) {
             text = text.substring(0, ${MAX_CONTENT_LENGTH});
             isTruncated = true;
@@ -299,7 +307,8 @@ export class MessageHandler {
           links: ${includeLinks ? "getLinks()" : "[]"},
           fullText: textContent.text,
           isTruncated: textContent.isTruncated,
-          totalLength: document.body.innerText.length
+          totalLength: source.length,
+          format: ${JSON.stringify(format)}
         };
       })();
     `,
@@ -313,6 +322,7 @@ export class MessageHandler {
       fullText,
       links,
       totalLength,
+      format,
     });
     await this.client.sendResourceToServer(message);
   }

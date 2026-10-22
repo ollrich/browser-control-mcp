@@ -3,13 +3,14 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import type { ZodRawShapeCompat } from "@modelcontextprotocol/sdk/server/zod-compat.js";
 import type { ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
-import { BrowserAPI } from "./browser-api";
+import { BrowserAPI, type ContentOptions } from "./browser-api";
 import dayjs from "dayjs";
 import relativeTime from "dayjs/plugin/relativeTime";
 import type { BrowserTab, PageMeta, TabContentExtensionMessage } from "@browser-control-mcp/common";
 import fs from "fs";
 import path from "path";
 import {
+  compactMarkdown,
   compactText,
   filterTabs,
   findSnippets,
@@ -237,7 +238,7 @@ registerTool(
   },
   READS_WEB,
   async ({ tabId, offset, includeLinks }) => {
-    const content = await browserApi.getTabContent(tabId, offset, includeLinks);
+    const content = await browserApi.getTabContent(tabId, offset, { includeLinks });
     let links: { type: "text"; text: string }[] = [];
     if (offset === 0 && includeLinks) {
       // Only include the links if offset is 0 (default value). Otherwise, we can
@@ -443,6 +444,14 @@ const slimParams = {
     .max(120_000)
     .default(DEFAULT_CONSENT_WAIT_MS)
     .describe("How long to wait for the user to grant access when a domain is read for the first time (0 = fail right away)"),
+  format: z
+    .enum(["text", "markdown"])
+    .default("text")
+    .describe("markdown keeps headings, lists, links, tables and code blocks (extension 2.0; the stock add-on sends text)"),
+  mainContentOnly: z
+    .boolean()
+    .default(false)
+    .describe("With markdown: only the page's main or article element, without menus and footers (extension 2.0)"),
 };
 
 interface SlimReadOptions {
@@ -450,6 +459,17 @@ interface SlimReadOptions {
   maxLinks: number;
   maxChars: number;
   consentWaitMs: number;
+  format: "text" | "markdown";
+  mainContentOnly: boolean;
+}
+
+// Only send the optional fields that differ from the plain text default.
+function contentOptions(opts: SlimReadOptions): ContentOptions {
+  return {
+    includeLinks: opts.includeLinks,
+    ...(opts.format === "markdown" ? { format: "markdown" as const } : {}),
+    ...(opts.mainContentOnly ? { mainContentOnly: true } : {}),
+  };
 }
 
 interface OpenReadOptions extends SlimReadOptions {
@@ -525,10 +545,10 @@ async function fetchTabContent(
   tab: BrowserTab,
   offset: number,
   consentWaitMs: number,
-  includeLinks = false
+  options: ContentOptions = {}
 ): Promise<TabContentExtensionMessage> {
   return withDomainConsent(tab, consentWaitMs, () =>
-    browserApi.getTabContent(tab.id as number, offset, includeLinks)
+    browserApi.getTabContent(tab.id as number, offset, options)
   );
 }
 
@@ -582,13 +602,13 @@ async function readWhenStable(
   maxSettleMs: number,
   consentWaitMs: number,
   waitForText?: string,
-  includeLinks = false
+  options: ContentOptions = {}
 ): Promise<{ content: TabContentExtensionMessage; textFound?: boolean }> {
   const needle = waitForText ? normalizeForSearch(waitForText) : "";
   const containsNeedle = (c: TabContentExtensionMessage) =>
     normalizeForSearch(c.fullText).includes(needle);
 
-  let content = await fetchTabContent(tab, offset, consentWaitMs, includeLinks);
+  let content = await fetchTabContent(tab, offset, consentWaitMs, options);
   let length = compactText(content.fullText).length;
   let matchingReads = 1;
   let delay = 600;
@@ -600,7 +620,7 @@ async function readWhenStable(
   while (!settled() && Date.now() + delay <= deadline) {
     await sleep(delay);
     delay = Math.min(Math.round(delay * 1.5), needle ? 1000 : 2000);
-    const next = await fetchTabContent(tab, offset, 0, includeLinks);
+    const next = await fetchTabContent(tab, offset, 0, options);
     const nextLength = compactText(next.fullText).length;
     matchingReads = lengthsSettled(length, nextLength) ? matchingReads + 1 : 1;
     content = next;
@@ -615,7 +635,8 @@ async function extendToMaxChars(
   tab: BrowserTab,
   offset: number,
   content: TabContentExtensionMessage,
-  maxChars: number
+  maxChars: number,
+  options: ContentOptions = {}
 ): Promise<TabContentExtensionMessage> {
   let chunks = 1;
   while (
@@ -624,7 +645,8 @@ async function extendToMaxChars(
     chunks < MAX_CHUNKS_PER_READ &&
     compactText(content.fullText).length < maxChars
   ) {
-    const next = await fetchTabContent(tab, offset + content.fullText.length, 0);
+    // Links come with the first chunk only.
+    const next = await fetchTabContent(tab, offset + content.fullText.length, 0, { ...options, includeLinks: false });
     if (!next.fullText) break;
     content = {
       ...content,
@@ -645,9 +667,11 @@ function formatTabContent(
   tabWillClose = false
 ): TextContent[] {
   const tabId = tab.id as number;
+  const markdown = content.format === "markdown";
   const slim = slimContent(content.fullText, content.links, {
     ...opts,
     pageUrl: tab.url,
+    compact: markdown ? compactMarkdown : compactText,
   });
   // Offsets count raw page characters, so continue after the raw text shown.
   const end = offset + slim.rawConsumed;
@@ -666,6 +690,9 @@ function formatTabContent(
         ? `${reason} The tab was closed again; to read on, call open-and-read-tab with closeAfter=false, then read-tab with its tabId and offset=${end}.`
         : `${reason} Call read-tab with tabId=${tabId} and offset=${end} for more.`
     );
+  }
+  if (opts.format === "markdown" && !markdown) {
+    notes.push("Markdown needs extension 2.0; the connected add-on sent plain text.");
   }
   if (opts.includeLinks && slim.droppedLinks > 0) {
     notes.push(`${slim.droppedLinks} duplicate or surplus links omitted.`);
@@ -706,14 +733,14 @@ async function openAndRead(
         opts.maxSettleMs,
         opts.consentWaitMs,
         opts.waitForText,
-        opts.includeLinks
+        contentOptions(opts)
       );
     } catch (error) {
       // Keep the tab, so read-tab can pick it up once the user has granted access.
       if (error instanceof ConsentPendingError) keepOpen = true;
       throw error;
     }
-    const content = await extendToMaxChars(loadedTab, opts.offset, read.content, opts.maxChars);
+    const content = await extendToMaxChars(loadedTab, opts.offset, read.content, opts.maxChars, contentOptions(opts));
 
     // Title and final URL (after redirects) are often only known after rendering.
     const tab = (await browserApi.getTabList()).find((t) => t.id === tabId) ?? loadedTab;
@@ -796,8 +823,8 @@ async function withTemporaryTab<T>(
 async function readOneTab(tab: BrowserTab, offset: number, opts: SlimReadOptions): Promise<TextContent[]> {
   if (tab.discarded && tab.url) {
     const result = await withTemporaryTab(tab.url, opts.consentWaitMs, async (copy) => {
-      const first = await fetchTabContent(copy, offset, 0, opts.includeLinks);
-      const content = await extendToMaxChars(copy, offset, first, opts.maxChars);
+      const first = await fetchTabContent(copy, offset, 0, contentOptions(opts));
+      const content = await extendToMaxChars(copy, offset, first, opts.maxChars, contentOptions(opts));
       return formatTabContent(copy, offset, content, opts, true);
     });
     result.splice(1, 0, {
@@ -806,8 +833,8 @@ async function readOneTab(tab: BrowserTab, offset: number, opts: SlimReadOptions
     });
     return result;
   }
-  const first = await fetchTabContent(tab, offset, opts.consentWaitMs, opts.includeLinks);
-  const content = await extendToMaxChars(tab, offset, first, opts.maxChars);
+  const first = await fetchTabContent(tab, offset, opts.consentWaitMs, contentOptions(opts));
+  const content = await extendToMaxChars(tab, offset, first, opts.maxChars, contentOptions(opts));
   return formatTabContent(tab, offset, content, opts);
 }
 
@@ -882,6 +909,8 @@ registerTool(
     includeLinks: slimParams.includeLinks,
     maxLinks: slimParams.maxLinks,
     consentWaitMs: slimParams.consentWaitMs,
+    format: slimParams.format,
+    mainContentOnly: slimParams.mainContentOnly,
   },
   READS_WEB,
   async ({ matches = [], tabIds = [], maxCharsPerTab, ...opts }) => {
