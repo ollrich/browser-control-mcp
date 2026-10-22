@@ -24,6 +24,7 @@ export interface BrowserTab {
   // Unloaded tab (lazy session restore or memory pressure); scripts cannot run in it.
   discarded?: boolean;
   hidden?: boolean;
+  pinned?: boolean;
 }
 
 export interface TabsExtensionMessage extends ExtensionMessageBase {

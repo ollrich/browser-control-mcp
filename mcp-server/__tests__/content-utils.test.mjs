@@ -12,7 +12,36 @@ const {
   pickActiveTab,
   normalizeOpenUrl,
   isConsentTabFor,
+  findSnippets,
+  filterTabs,
+  tabFlags,
 } = utils;
+
+test("findSnippets marks hits, merges close ones and keeps raw offsets", () => {
+  const raw = "Intro text.\n\nThe Green   Party met. Later the green party voted.\n" + "x".repeat(500) + " green party again";
+  const res = findSnippets(raw, ["green party", "  ", "nothing"], { contextChars: 15, maxResults: 10 });
+  assert.deepEqual(res.counts, [
+    { phrase: "green party", count: 3 },
+    { phrase: "nothing", count: 0 },
+  ]);
+  assert.equal(res.totalSnippets, 2, "the first two hits share one snippet");
+  assert.equal(res.snippets[0].offset, raw.indexOf("Green"));
+  assert.match(res.snippets[0].text, /^…tro text\. The «Green Party» met\. Later the «green party» voted\./);
+  assert.match(res.snippets[1].text, /«green party» again$/);
+  assert.equal(findSnippets(raw, ["green party"], { contextChars: 15, maxResults: 1 }).snippets.length, 1);
+  assert.equal(findSnippets("a (b) c", ["(b)"], { contextChars: 5, maxResults: 5 }).counts[0].count, 1, "regex characters are literal");
+});
+
+test("filterTabs and tabFlags", () => {
+  const tabs = [
+    { id: 1, url: "about:preferences", title: "Settings", active: true },
+    { id: 2, url: "https://github.com/x", title: "Repo", discarded: true, pinned: true },
+  ];
+  assert.deepEqual(filterTabs(tabs, "settings").map((t) => t.id), [1], "non web tabs can be listed");
+  assert.deepEqual(filterTabs(tabs, "github repo").map((t) => t.id), [2]);
+  assert.deepEqual(tabFlags(tabs[0]), ["active"]);
+  assert.deepEqual(tabFlags({ ...tabs[1], status: "loading" }), ["unloaded", "loading", "pinned"]);
+});
 
 test("compactText collapses blank lines and space runs", () => {
   const input = "Title\r\n\r\n\r\n\r\n  Body   text\t\twith  gaps \n\n\n\nEnd  ";

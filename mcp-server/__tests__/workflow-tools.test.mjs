@@ -76,6 +76,14 @@ function startFakeExtension(port, state) {
         state.tabs = state.tabs.filter((t) => !payload.tabIds.includes(t.id));
         reply({ resource: "tabs-closed" });
         break;
+      case "get-browser-recent-history": {
+        const query = (payload.searchQuery ?? "").toLowerCase();
+        reply({
+          resource: "history",
+          historyItems: state.history.filter((item) => `${item.url} ${item.title}`.toLowerCase().includes(query)),
+        });
+        break;
+      }
       case "get-tab-content": {
         const tab = state.tabs.find((t) => t.id === payload.tabId);
         if (!tab) return fail(`Invalid tab ID: ${payload.tabId}`);
@@ -115,11 +123,11 @@ function startFakeExtension(port, state) {
   return new Promise((resolve) => ws.on("open", () => resolve(ws)));
 }
 
-async function startClient(port, home) {
+async function startClient(port, home, extraEnv = {}) {
   const transport = new StdioClientTransport({
     command: process.execPath,
     args: [serverJs],
-    env: { ...process.env, HOME: home, EXTENSION_SECRET: SECRET, EXTENSION_PORT: String(port) },
+    env: { ...process.env, HOME: home, EXTENSION_SECRET: SECRET, EXTENSION_PORT: String(port), ...extraEnv },
     stderr: "pipe",
   });
   const client = new Client({ name: "test", version: "0" });
@@ -143,6 +151,11 @@ const state = {
   deniedOrigins: new Set(),
   pages: {},
   tabs: [],
+  history: [
+    { url: "https://news.example/today", title: "Today's news", lastVisitTime: Date.now() - 2 * 3_600_000 },
+    { url: "https://news.example/old", title: "Old news", lastVisitTime: Date.now() - 50 * 3_600_000 },
+    { url: "https://docs.example/guide", title: "Guide", lastVisitTime: Date.now() - 3 * 3_600_000 },
+  ],
 };
 let port;
 let home;
@@ -354,6 +367,92 @@ test("without maxChars a reply stays at 40000 characters and names the offset", 
   assert.match(text, /characters 0-39999 of 60000/);
   assert.match(text, /Output was cut at maxChars=40000\. Call read-tab with tabId=8 and offset=39999/);
   assert.equal(res.content[res.content.length - 1].text.length, 40_000);
+});
+
+test("search-tab returns marked snippets with offsets across the whole page", async () => {
+  let res = await leader.callTool({ name: "search-tab", arguments: { tabId: 1, query: "rohan nayak | POCKET   fm", contextChars: 20, maxResults: 2 } });
+  let text = textOf(res);
+  assert.match(text, /"rohan nayak": 1 hit, "POCKET fm": 30 hits/);
+  assert.match(text, /\[offset 0\] «Rohan Nayak» post/);
+  assert.match(text, /«Pocket FM» grew/);
+  assert.match(text, /Showing 2 of \d+ snippets/);
+
+  // Hits beyond the first extension chunk are found as well.
+  state.pageCap = 100;
+  try {
+    res = await leader.callTool({ name: "search-tab", arguments: { tabId: 1, query: "grew a lot", maxResults: 100 } });
+    text = textOf(res);
+    assert.match(text, /"grew a lot": 30 hits/);
+    assert.match(text, new RegExp(`${longText.length} of ${longText.length} characters searched`));
+  } finally {
+    state.pageCap = 50_000;
+  }
+
+  res = await leader.callTool({ name: "search-tab", arguments: { match: "karakeep", query: "missing words" } });
+  assert.match(textOf(res), /"missing words": 0 hits/);
+});
+
+test("search-tab searches an unloaded tab through a temporary copy", async () => {
+  const tabCount = state.tabs.length;
+  const res = await leader.callTool({ name: "search-tab", arguments: { tabId: 7, query: "article" } });
+  const text = textOf(res);
+  assert.match(text, /«article»/);
+  assert.match(text, /Tab 7 is unloaded/);
+  assert.equal(state.tabs.length, tabCount, "temporary tab closed again");
+});
+
+test("read-tabs reads several tabs once each and reports misses", async () => {
+  const res = await leader.callTool({
+    name: "read-tabs",
+    arguments: { tabIds: [1], matches: ["rohannayak2", "karakeep", "nowhere-to-be-found"] },
+  });
+  const text = textOf(res);
+  assert.match(text, /^Read 2 of 3 tabs, up to 13333 characters each\./);
+  assert.match(text, /Rohan Nayak post/);
+  assert.match(text, /Bookmarks list/);
+  assert.match(text, /No open tab matches "nowhere-to-be-found"\./);
+  assert.equal((text.match(/tab id=1,/g) ?? []).length, 1, "tab 1 read once");
+});
+
+test("the tab list filters, sorts and flags tabs in one block", async () => {
+  let res = await leader.callTool({ name: "get-list-of-open-tabs", arguments: { match: "karakeep" } });
+  assert.equal(res.content.length, 1);
+  assert.match(res.content[0].text, /^Showing tabs 1-1 of 1 matching "karakeep"\ntab id=2, .*active/);
+
+  res = await leader.callTool({ name: "get-list-of-open-tabs", arguments: { match: "old.example" } });
+  assert.match(res.content[0].text, /tab id=7, .*unloaded/);
+
+  res = await leader.callTool({ name: "get-list-of-open-tabs", arguments: { sort: "recent", limit: 1 } });
+  assert.match(res.content[0].text, /use offset=1 to see more/);
+});
+
+test("browser history comes as one block, filtered by query and age", async () => {
+  let res = await leader.callTool({ name: "get-recent-browser-history", arguments: { searchQuery: "news", sinceHours: 24 } });
+  assert.equal(res.content.length, 1);
+  assert.match(res.content[0].text, /^1 of 1 pages\nurl=https:\/\/news\.example\/today/);
+
+  res = await leader.callTool({ name: "get-recent-browser-history", arguments: { limit: 2 } });
+  const lines = res.content[0].text.split("\n");
+  assert.equal(lines[0], "2 of 3 pages (raise limit to see more)");
+  assert.match(lines[1], /today/, "newest first");
+});
+
+test("BROWSER_MCP_TOOLS limits the offered tools", async () => {
+  const readOnly = await startClient(port, home, { BROWSER_MCP_TOOLS: "read" });
+  const picked = await startClient(port, home, { BROWSER_MCP_TOOLS: "read-tab, search-tab" });
+  try {
+    const names = (await readOnly.listTools()).tools.map((tool) => tool.name);
+    for (const name of ["read-tab", "read-tabs", "search-tab", "open-and-read-tab", "open-browser-tab", "capture-tab-screenshot"]) {
+      assert.ok(names.includes(name), name);
+    }
+    for (const name of ["close-browser-tabs", "reorder-browser-tabs", "group-browser-tabs", "find-highlight-in-browser-tab"]) {
+      assert.ok(!names.includes(name), name);
+    }
+    assert.deepEqual((await picked.listTools()).tools.map((tool) => tool.name).sort(), ["read-tab", "search-tab"]);
+  } finally {
+    await readOnly.close();
+    await picked.close();
+  }
 });
 
 test("a second session forwards through the broker", async () => {

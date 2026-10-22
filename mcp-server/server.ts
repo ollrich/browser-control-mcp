@@ -1,5 +1,7 @@
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { McpServer, type ToolCallback } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import type { ZodRawShapeCompat } from "@modelcontextprotocol/sdk/server/zod-compat.js";
+import type { ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { BrowserAPI } from "./browser-api";
 import dayjs from "dayjs";
@@ -9,12 +11,15 @@ import fs from "fs";
 import path from "path";
 import {
   compactText,
+  filterTabs,
+  findSnippets,
   formatTabLine,
   isConsentTabFor,
   matchTabs,
   normalizeOpenUrl,
   pickActiveTab,
   slimContent,
+  tabFlags,
 } from "./content-utils";
 
 dayjs.extend(relativeTime);
@@ -40,7 +45,33 @@ const READS_WEB = { readOnlyHint: true, openWorldHint: true };
 const OPENS_PAGES = { readOnlyHint: false, destructiveHint: false, openWorldHint: true };
 const CHANGES_TABS = { readOnlyHint: false, destructiveHint: false, openWorldHint: false };
 
-mcpServer.tool(
+// BROWSER_MCP_TOOLS picks the offered tools: "all" (default), "read" (tools that
+// only read, plus opening pages) or a comma separated list of tool names.
+const toolProfile = (process.env.BROWSER_MCP_TOOLS ?? "").trim() || "all";
+const knownToolNames: string[] = [];
+
+function isToolEnabled(name: string, annotations: ToolAnnotations): boolean {
+  if (toolProfile === "all") return true;
+  if (toolProfile === "read") {
+    return annotations.readOnlyHint === true || (annotations.openWorldHint === true && annotations.destructiveHint === false);
+  }
+  return toolProfile.split(",").map((entry) => entry.trim()).includes(name);
+}
+
+function registerTool<Args extends ZodRawShapeCompat>(
+  name: string,
+  description: string,
+  paramsSchema: Args,
+  annotations: ToolAnnotations,
+  cb: ToolCallback<Args>
+): void {
+  knownToolNames.push(name);
+  if (isToolEnabled(name, annotations)) {
+    mcpServer.tool(name, description, paramsSchema, annotations, cb);
+  }
+}
+
+registerTool(
   "open-browser-tab",
   "Open a new tab in the user's browser (useful when the user asks to open a website)",
   { url: z.string() },
@@ -66,7 +97,7 @@ mcpServer.tool(
   }
 );
 
-mcpServer.tool(
+registerTool(
   "close-browser-tabs",
   "Close tabs in the user's browser by tab IDs",
   { tabIds: z.array(z.number()) },
@@ -79,49 +110,51 @@ mcpServer.tool(
   }
 );
 
-mcpServer.tool(
+registerTool(
   "get-list-of-open-tabs",
-  "Get the list of open tabs in the user's browser. Use offset and limit parameters for pagination when there are many tabs.",
+  `Get the list of open tabs in the user's browser, one line per tab with state flags
+   (active, unloaded, loading). Filter with match; page with offset and limit.`,
   {
+    match: z
+      .string()
+      .optional()
+      .describe("Only tabs whose URL or title contains all these words, e.g. 'github' or 'spiegel politik'"),
+    sort: z
+      .enum(["position", "recent"])
+      .default("position")
+      .describe("position = browser order, recent = most recently used first"),
     offset: z.number().int().min(0).default(0).describe("Starting index for pagination (0-based, must be >= 0)"),
     limit: z.number().default(100).describe("Maximum number of tabs to return (default: 100, max: 500)"),
   },
   READS_BROWSER,
-  async ({ offset, limit }) => {
-    // Validate and cap the limit
+  async ({ match, sort, offset, limit }) => {
     const effectiveLimit = Math.min(Math.max(1, limit), 500);
 
-    const openTabs = await browserApi.getTabList();
-    const totalTabs = openTabs.length;
+    let tabs = await browserApi.getTabList();
+    if (match) tabs = filterTabs(tabs, match);
+    if (sort === "recent") tabs = [...tabs].sort((a, b) => (b.lastAccessed ?? 0) - (a.lastAccessed ?? 0));
+    const total = tabs.length;
+    const page = tabs.slice(offset, offset + effectiveLimit);
+    const hasMore = offset + effectiveLimit < total;
 
-    // Apply pagination
-    const paginatedTabs = openTabs.slice(offset, offset + effectiveLimit);
-    const hasMore = offset + effectiveLimit < totalTabs;
-
-    // Add pagination info as the first content item
-    const paginationInfo = {
-      type: "text" as const,
-      text: `Showing tabs ${offset + 1}-${offset + paginatedTabs.length} of ${totalTabs} total tabs${hasMore ? ` (use offset=${offset + effectiveLimit} to see more)` : ''}`,
-    };
-
-    const tabContent = paginatedTabs.map((tab) => {
-      let lastAccessed = "unknown";
-      if (tab.lastAccessed) {
-        lastAccessed = dayjs(tab.lastAccessed).fromNow(); // LLM-friendly time ago
-      }
-      return {
-        type: "text" as const,
-        text: `tab id=${tab.id}, tab url=${tab.url}, tab title=${tab.title}, last accessed=${lastAccessed}`,
-      };
+    const summary =
+      total === 0
+        ? `No open tabs${match ? ` match "${match}"` : ""}.`
+        : `Showing tabs ${offset + 1}-${offset + page.length} of ${total}${match ? ` matching "${match}"` : ""}` +
+          (hasMore ? ` (use offset=${offset + effectiveLimit} to see more)` : "");
+    const lines = page.map((tab) => {
+      const lastAccessed = tab.lastAccessed ? dayjs(tab.lastAccessed).fromNow() : "unknown";
+      const flags = tabFlags(tab);
+      return `tab id=${tab.id}, url=${tab.url}, title=${tab.title}, last accessed=${lastAccessed}${flags.length ? `, ${flags.join(", ")}` : ""}`;
     });
 
     return {
-      content: [paginationInfo, ...tabContent],
+      content: [{ type: "text", text: [summary, ...lines].join("\n") }],
     };
   }
 );
 
-mcpServer.tool(
+registerTool(
   "get-current-tab",
   "Get information about the currently active tab in the browser",
   {},
@@ -139,7 +172,7 @@ mcpServer.tool(
   }
 );
 
-mcpServer.tool(
+registerTool(
   "get-tab-metadata",
   "Get comprehensive metadata about a specific tab, including state, position, window, audio, dimensions, favicon, and last access properties when available.",
   { tabId: z.number() },
@@ -157,38 +190,41 @@ mcpServer.tool(
   }
 );
 
-mcpServer.tool(
+registerTool(
   "get-recent-browser-history",
-  "Get the list of recent browser history (to get all, don't use searchQuery)",
-  { searchQuery: z.string().optional() },
+  `Get recently visited pages from the browser history, newest first, one line per page
+   (to get all, don't use searchQuery). The browser returns at most 200 pages per query.`,
+  {
+    searchQuery: z.string().optional().describe("Words that must appear in the URL or title"),
+    sinceHours: z.number().min(0).optional().describe("Only pages visited within this many hours"),
+    limit: z.number().int().min(1).max(200).default(50),
+  },
   READS_BROWSER,
-  async ({ searchQuery }) => {
-    const browserHistory = await browserApi.getBrowserRecentHistory(
-      searchQuery
-    );
-    if (browserHistory.length > 0) {
-      return {
-        content: browserHistory.map((item) => {
-          let lastVisited = "unknown";
-          if (item.lastVisitTime) {
-            lastVisited = dayjs(item.lastVisitTime).fromNow(); // LLM-friendly time ago
-          }
-          return {
-            type: "text",
-            text: `url=${item.url}, title="${item.title}", lastVisitTime=${lastVisited}`,
-          };
-        }),
-      };
-    } else {
-      // If nothing was found for the search query, hint the AI to list
-      // all the recent history items instead.
-      const hint = searchQuery ? "Try without a searchQuery" : "";
-      return { content: [{ type: "text", text: `No history found. ${hint}` }] };
+  async ({ searchQuery, sinceHours, limit }) => {
+    let items = await browserApi.getBrowserRecentHistory(searchQuery);
+    if (sinceHours !== undefined) {
+      const since = Date.now() - sinceHours * 3_600_000;
+      items = items.filter((item) => (item.lastVisitTime ?? 0) >= since);
     }
+    items = [...items].sort((a, b) => (b.lastVisitTime ?? 0) - (a.lastVisitTime ?? 0));
+
+    if (items.length === 0) {
+      // Point the model at the broader query instead of a dead end.
+      const hint = searchQuery || sinceHours !== undefined ? " Try without searchQuery or sinceHours." : "";
+      return { content: [{ type: "text", text: `No history found.${hint}` }] };
+    }
+
+    const shown = items.slice(0, limit);
+    const lines = shown.map((item) => {
+      const lastVisited = item.lastVisitTime ? dayjs(item.lastVisitTime).fromNow() : "unknown";
+      return `url=${item.url}, title="${item.title}", last visited=${lastVisited}`;
+    });
+    const summary = `${shown.length} of ${items.length} pages${items.length > shown.length ? ` (raise limit to see more)` : ""}`;
+    return { content: [{ type: "text", text: [summary, ...lines].join("\n") }] };
   }
 );
 
-mcpServer.tool(
+registerTool(
   "get-tab-web-content",
   `
     Get the full text content of the webpage and the list of links in the webpage, by tab ID. 
@@ -238,7 +274,7 @@ mcpServer.tool(
   }
 );
 
-mcpServer.tool(
+registerTool(
   "reorder-browser-tabs",
   "Change the order of open browser tabs",
   { tabOrder: z.array(z.number()) },
@@ -253,7 +289,7 @@ mcpServer.tool(
   }
 );
 
-mcpServer.tool(
+registerTool(
   "find-highlight-in-browser-tab",
   "Find and highlight text in a browser tab (use a query phrase that exists in the web content)",
   { tabId: z.number(), queryPhrase: z.string() },
@@ -271,7 +307,7 @@ mcpServer.tool(
   }
 );
 
-mcpServer.tool(
+registerTool(
   "group-browser-tabs",
   "Organize opened browser tabs in a new tab group",
   {
@@ -311,7 +347,7 @@ mcpServer.tool(
   }
 );
 
-mcpServer.tool(
+registerTool(
   "capture-tab-screenshot",
   `
     Capture a screenshot of the visible area of a browser tab, by tab ID (default: the active tab).
@@ -684,7 +720,98 @@ async function openAndRead(
   }
 }
 
-mcpServer.tool(
+// Same tab choice for every reading tool: tabId, else best match, else the
+// active web page.
+function selectTab(
+  tabs: BrowserTab[],
+  match: string | undefined,
+  tabId: number | undefined
+): { tab?: BrowserTab; others: BrowserTab[]; missing: { content: TextContent[]; isError: true } } {
+  let tab: BrowserTab | undefined;
+  let others: BrowserTab[] = [];
+  if (tabId !== undefined) {
+    tab = tabs.find((t) => t.id === tabId);
+  } else if (match) {
+    ({ best: tab, others } = matchTabs(tabs, match));
+  } else {
+    tab = pickActiveTab(tabs, true);
+  }
+  const wanted = tabId !== undefined ? `id ${tabId}` : match ? `"${match}"` : "a web page";
+  return {
+    tab,
+    others,
+    missing: {
+      content: [{ type: "text", text: `No open tab matches ${wanted}. Use open-and-read-tab to open the URL.` }],
+      isError: true,
+    },
+  };
+}
+
+// Scripts cannot run in an unloaded tab. Work on a fresh copy in a temporary tab
+// instead of waking the original; the copy closes again unless it still waits
+// for the user's domain consent.
+async function withTemporaryTab<T>(
+  url: string,
+  consentWaitMs: number,
+  use: (tab: BrowserTab) => Promise<T>
+): Promise<T> {
+  const { url: target } = normalizeOpenUrl(url);
+  const tabId = await browserApi.openTab(target);
+  if (tabId === undefined) {
+    throw new Error(`Failed to open a temporary tab for ${url}`);
+  }
+  let keepOpen = false;
+  try {
+    const { tab } = await waitForTabComplete(tabId, DEFAULT_LOAD_TIMEOUT_MS);
+    await sleep(DEFAULT_SETTLE_MS);
+    await readWhenStable(tab, 0, DEFAULT_MAX_SETTLE_MS, consentWaitMs);
+    return await use(tab);
+  } catch (error) {
+    if (error instanceof ConsentPendingError) keepOpen = true;
+    throw error;
+  } finally {
+    if (!keepOpen) {
+      await browserApi.closeTabs([tabId]).catch(() => undefined);
+    }
+  }
+}
+
+async function readOneTab(tab: BrowserTab, offset: number, opts: SlimReadOptions): Promise<TextContent[]> {
+  if (tab.discarded && tab.url) {
+    const result = await withTemporaryTab(tab.url, opts.consentWaitMs, async (copy) => {
+      const first = await fetchTabContent(copy, offset, 0);
+      const content = await extendToMaxChars(copy, offset, first, opts.maxChars);
+      return formatTabContent(copy, offset, content, opts, true);
+    });
+    result.splice(1, 0, {
+      type: "text",
+      text: `Tab ${tab.id} is unloaded (discarded), so a fresh copy was read in a temporary tab.`,
+    });
+    return result;
+  }
+  const first = await fetchTabContent(tab, offset, opts.consentWaitMs);
+  const content = await extendToMaxChars(tab, offset, first, opts.maxChars);
+  return formatTabContent(tab, offset, content, opts);
+}
+
+// Searching covers the whole page, so it may read more chunks than reading does.
+const MAX_SEARCH_CHUNKS = 20;
+
+async function fetchWholePage(
+  tab: BrowserTab,
+  consentWaitMs: number
+): Promise<{ text: string; totalLength: number; complete: boolean }> {
+  let content = await fetchTabContent(tab, 0, consentWaitMs);
+  let text = content.fullText;
+  for (let chunks = 1; content.isTruncated && chunks < MAX_SEARCH_CHUNKS; chunks++) {
+    content = await fetchTabContent(tab, text.length, 0);
+    if (!content.fullText) break;
+    text += content.fullText;
+  }
+  return { text, totalLength: content.totalLength, complete: text.length >= content.totalLength };
+}
+
+registerTool(
   "read-tab",
   `Read the text of an open tab in one step, found by URL or title fragment (or by tabId).
    Without match and tabId it reads the active tab. Prefer this over
@@ -701,55 +828,10 @@ mcpServer.tool(
   },
   READS_WEB,
   async ({ match, tabId, offset, ...opts }) => {
-    const tabs = await browserApi.getTabList();
-    let tab: BrowserTab | undefined;
-    let others: BrowserTab[] = [];
+    const { tab, others, missing } = selectTab(await browserApi.getTabList(), match, tabId);
+    if (!tab) return missing;
 
-    if (tabId !== undefined) {
-      tab = tabs.find((t) => t.id === tabId);
-    } else if (match) {
-      ({ best: tab, others } = matchTabs(tabs, match));
-    } else {
-      tab = pickActiveTab(tabs, true);
-    }
-
-    if (!tab) {
-      const wanted = tabId !== undefined ? `id ${tabId}` : match ? `"${match}"` : "a web page";
-      return {
-        content: [
-          {
-            type: "text",
-            text: `No open tab matches ${wanted}. Use open-and-read-tab to open the URL.`,
-          },
-        ],
-        isError: true,
-      };
-    }
-
-    let result: TextContent[];
-    if (tab.discarded && tab.url) {
-      // Scripts cannot run in an unloaded tab. Read a fresh copy in a temporary
-      // tab instead of waking the original.
-      const fresh = await openAndRead(tab.url, {
-        ...opts,
-        offset,
-        settleMs: DEFAULT_SETTLE_MS,
-        maxSettleMs: DEFAULT_MAX_SETTLE_MS,
-        timeoutMs: DEFAULT_LOAD_TIMEOUT_MS,
-        closeAfter: true,
-      });
-      if (fresh.isError) return fresh;
-      result = fresh.content;
-      result.splice(1, 0, {
-        type: "text",
-        text: `Tab ${tab.id} is unloaded (discarded), so a fresh copy was read in a temporary tab.`,
-      });
-    } else {
-      const first = await fetchTabContent(tab, offset, opts.consentWaitMs);
-      const content = await extendToMaxChars(tab, offset, first, opts.maxChars);
-      result = formatTabContent(tab, offset, content, opts);
-    }
-
+    const result = await readOneTab(tab, offset, opts);
     if (others.length) {
       result.splice(1, 0, {
         type: "text",
@@ -762,7 +844,124 @@ mcpServer.tool(
   }
 );
 
-mcpServer.tool(
+registerTool(
+  "read-tabs",
+  `Read several open tabs in one call, chosen by URL or title fragments and/or tab ids.
+   The character budget is shared evenly; a tab that fails is reported without
+   stopping the others.`,
+  {
+    matches: z
+      .array(z.string())
+      .optional()
+      .describe("URL or title fragments, one per tab, e.g. ['spiegel', 'heise vorsorge']"),
+    tabIds: z.array(z.number()).optional(),
+    maxCharsPerTab: z
+      .number()
+      .int()
+      .min(500)
+      .max(50_000)
+      .optional()
+      .describe(`Default: ${DEFAULT_MAX_CHARS} split evenly, at least 2000 per tab`),
+    includeLinks: slimParams.includeLinks,
+    maxLinks: slimParams.maxLinks,
+    consentWaitMs: slimParams.consentWaitMs,
+  },
+  READS_WEB,
+  async ({ matches = [], tabIds = [], maxCharsPerTab, ...opts }) => {
+    const tabs = await browserApi.getTabList();
+    const targets: { label: string; tab?: BrowserTab }[] = [
+      ...tabIds.map((id) => ({ label: `id ${id}`, tab: tabs.find((t) => t.id === id) })),
+      ...matches.map((match) => ({ label: `"${match}"`, tab: matchTabs(tabs, match).best })),
+    ];
+    if (targets.length === 0) {
+      return { content: [{ type: "text", text: "Give matches or tabIds." }], isError: true };
+    }
+    if (targets.length > 20) {
+      return { content: [{ type: "text", text: "At most 20 tabs per call." }], isError: true };
+    }
+
+    // The same tab can be named twice (by id and by fragment); read it once.
+    const seen = new Set<number>();
+    const unique = targets.filter(({ tab }) => !tab || (!seen.has(tab.id as number) && seen.add(tab.id as number)));
+    const maxChars = maxCharsPerTab ?? Math.max(2000, Math.floor(DEFAULT_MAX_CHARS / unique.length));
+
+    const content: TextContent[] = [];
+    let failed = 0;
+    for (const { label, tab } of unique) {
+      if (!tab) {
+        failed++;
+        content.push({ type: "text", text: `No open tab matches ${label}.` });
+        continue;
+      }
+      try {
+        content.push(...(await readOneTab(tab, 0, { ...opts, maxChars })));
+      } catch (error) {
+        failed++;
+        content.push({ type: "text", text: `${formatTabLine(tab)}: ${errorText(error)}` });
+      }
+    }
+    content.unshift({
+      type: "text",
+      text: `Read ${unique.length - failed} of ${unique.length} tabs, up to ${maxChars} characters each.`,
+    });
+    return { content };
+  }
+);
+
+registerTool(
+  "search-tab",
+  `Find text in an open tab without reading all of it: returns short snippets around each
+   hit with its character offset (read more with read-tab and that offset). Searches the
+   whole page, not just the first chunk. The tab is chosen like in read-tab.`,
+  {
+    query: z
+      .string()
+      .min(1)
+      .describe("Phrase to find, ignoring case and spacing. Separate several phrases with |, e.g. 'Habeck | Grüne'"),
+    match: z.string().optional().describe("URL or title fragment of the tab, as in read-tab"),
+    tabId: z.number().optional(),
+    contextChars: z.number().int().min(20).max(2000).default(200).describe("Characters shown before and after each hit"),
+    maxResults: z.number().int().min(1).max(100).default(10),
+    consentWaitMs: slimParams.consentWaitMs,
+  },
+  READS_WEB,
+  async ({ query, match, tabId, contextChars, maxResults, consentWaitMs }) => {
+    const { tab, missing } = selectTab(await browserApi.getTabList(), match, tabId);
+    if (!tab) return missing;
+
+    const phrases = query.split("|").map((phrase) => phrase.trim()).filter(Boolean);
+    const searched =
+      tab.discarded && tab.url
+        ? await withTemporaryTab(tab.url, consentWaitMs, (copy) => fetchWholePage(copy, 0))
+        : await fetchWholePage(tab, consentWaitMs);
+    const found = findSnippets(searched.text, phrases, { contextChars, maxResults });
+
+    const counts = found.counts.map(({ phrase, count }) => `"${phrase}": ${count} hit${count === 1 ? "" : "s"}`).join(", ");
+    const notes = [
+      `${formatTabLine(tab)}, ${searched.text.length} of ${searched.totalLength} characters searched.`,
+      `${counts}.`,
+      found.totalSnippets > found.snippets.length
+        ? `Showing ${found.snippets.length} of ${found.totalSnippets} snippets; raise maxResults for more.`
+        : undefined,
+      searched.complete ? undefined : "The page is longer than the search limit; later text was not searched.",
+      tab.discarded ? `Tab ${tab.id} is unloaded, so a fresh copy was searched in a temporary tab.` : undefined,
+      found.snippets.length && !tab.discarded
+        ? `Read around a hit with read-tab tabId=${tab.id} and an offset a little before the hit.`
+        : undefined,
+    ].filter(Boolean);
+
+    const content: TextContent[] = [{ type: "text", text: notes.join(" ") }];
+    if (found.snippets.length) {
+      content.push({
+        type: "text",
+        text: found.snippets.map((snippet) => `[offset ${snippet.offset}] ${snippet.text}`).join("\n\n"),
+      });
+    }
+    return { content };
+  }
+);
+
+registerTool(
   "open-and-read-tab",
   `Open an https URL in a new tab, wait until it has loaded and rendered, and return its text
    in one call. Use for live pages where a plain web fetch returns stale or empty content.
@@ -795,6 +994,16 @@ mcpServer.tool(
   OPENS_PAGES,
   async ({ url, ...opts }) => openAndRead(url, { ...opts, offset: 0 })
 );
+
+if (toolProfile !== "all" && toolProfile !== "read") {
+  const unknown = toolProfile
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter((entry) => entry && !knownToolNames.includes(entry));
+  if (unknown.length) {
+    console.error(`browser-control: BROWSER_MCP_TOOLS names unknown tools: ${unknown.join(", ")}`);
+  }
+}
 
 const browserApi = new BrowserAPI();
 browserApi.init().catch((err) => {

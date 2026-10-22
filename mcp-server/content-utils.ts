@@ -205,6 +205,105 @@ export function formatTabLine(tab: BrowserTab): string {
   return `tab id=${tab.id}, url=${tab.url}, title=${tab.title}`;
 }
 
+/** Tab state worth knowing before reading it. */
+export function tabFlags(tab: BrowserTab): string[] {
+  const flags: string[] = [];
+  if (tab.active) flags.push("active");
+  if (tab.discarded) flags.push("unloaded");
+  if (tab.status === "loading") flags.push("loading");
+  if (tab.hidden) flags.push("hidden");
+  if (tab.pinned) flags.push("pinned");
+  return flags;
+}
+
+/** Tabs whose URL or title contains every whitespace separated term (any scheme). */
+export function filterTabs(tabs: BrowserTab[], query: string): BrowserTab[] {
+  const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
+  return tabs.filter((tab) => {
+    const haystack = `${tab.url ?? ""} ${tab.title ?? ""}`.toLowerCase();
+    return terms.every((term) => haystack.includes(term));
+  });
+}
+
+export interface Snippet {
+  // Raw page offset of the first hit, usable as read-tab offset.
+  offset: number;
+  text: string;
+}
+
+export interface SnippetResult {
+  counts: { phrase: string; count: number }[];
+  snippets: Snippet[];
+  // Snippets found in total, before maxResults.
+  totalSnippets: number;
+}
+
+function phrasePattern(phrase: string): RegExp | undefined {
+  const words = phrase
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((word) => word.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+  return words.length ? new RegExp(words.join("\\s+"), "gi") : undefined;
+}
+
+/**
+ * Find phrases in raw page text (case insensitive, any whitespace between
+ * words) and cut a snippet of contextChars around each hit. Hits whose
+ * snippets overlap share one snippet; hits are marked with «».
+ */
+export function findSnippets(
+  raw: string,
+  phrases: string[],
+  options: { contextChars: number; maxResults: number }
+): SnippetResult {
+  const hits: { start: number; end: number }[] = [];
+  const counts: { phrase: string; count: number }[] = [];
+  for (const phrase of phrases) {
+    const pattern = phrasePattern(phrase);
+    if (!pattern) continue;
+    let count = 0;
+    for (const match of raw.matchAll(pattern)) {
+      count++;
+      hits.push({ start: match.index, end: match.index + match[0].length });
+    }
+    counts.push({ phrase: phrase.trim().replace(/\s+/g, " "), count });
+  }
+  hits.sort((a, b) => a.start - b.start);
+
+  // Dense hits would otherwise merge into one snippet as long as the page.
+  const maxWindow = Math.max(4 * options.contextChars, 300);
+  const windows: { from: number; to: number; marks: { start: number; end: number }[] }[] = [];
+  for (const hit of hits) {
+    const from = Math.max(0, hit.start - options.contextChars);
+    const to = Math.min(raw.length, hit.end + options.contextChars);
+    const last = windows[windows.length - 1];
+    if (last && from <= last.to && to - last.from <= maxWindow) {
+      last.to = Math.max(last.to, to);
+      last.marks.push(hit);
+    } else {
+      windows.push({ from, to, marks: [hit] });
+    }
+  }
+
+  const snippets = windows.slice(0, options.maxResults).map((window) => {
+    let text = "";
+    let position = window.from;
+    for (const mark of window.marks) {
+      // Hits of different phrases can overlap; mark the first one only.
+      if (mark.start < position) continue;
+      text += `${raw.slice(position, mark.start)}«${raw.slice(mark.start, mark.end)}»`;
+      position = mark.end;
+    }
+    text += raw.slice(position, window.to);
+    const before = window.from > 0 ? "…" : "";
+    const after = window.to < raw.length ? "…" : "";
+    return { offset: window.marks[0].start, text: `${before}${text.replace(/\s+/g, " ").trim()}${after}` };
+  });
+
+  return { counts, snippets, totalSnippets: windows.length };
+}
+
 /**
  * Accept what people type: bare domains get https://, http:// is upgraded
  * because the extension only opens https URLs.

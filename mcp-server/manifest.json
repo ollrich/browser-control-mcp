@@ -1,7 +1,7 @@
 {
     "dxt_version": "0.1",
     "name": "browser-control-firefox",
-    "version": "1.6.1-ollie.3",
+    "version": "1.6.1-ollie.4",
     "display_name": "Firefox Control",
     "description": "Control Mozilla Firefox: tabs, history and web content (privacy aware). Fork with one step read tools.",
     "long_description": "This MCP server provides AI assistants with access to the browser's tab management, browsing history, page search, and webpage text content through a local MCP (Model Context Protocol) connection.\n\nBefore accessing any webpage content, explicit user consent is required for each domain through browser-side permissions.\n\n**Note:** This extension requires a separate Firefox add-on component, which is available at [https://addons.mozilla.org/en-US/firefox/addon/browser-control-mcp/](https://addons.mozilla.org/en-US/firefox/addon/browser-control-mcp/). Start by installing the Firefox add-on, then copy the secret key from the add-on settings page (it will open automatically) and paste it into this extension's configuration.",
@@ -30,7 +30,8 @@
             ],
             "env": {
                 "EXTENSION_SECRET": "${user_config.extension_secret}",
-                "EXTENSION_PORT": "${user_config.port}"
+                "EXTENSION_PORT": "${user_config.port}",
+                "BROWSER_MCP_TOOLS": "${user_config.tool_profile}"
             }
         }
     },
@@ -48,6 +49,13 @@
             "description": "The port that the MCP server will use to communicate with the Firefox extension (default is 8089)",
             "default": "8089",
             "required": false
+        },
+        "tool_profile": {
+            "type": "string",
+            "title": "Tool profile",
+            "description": "all = every tool, read = only reading tools plus opening pages, or a comma separated list of tool names",
+            "default": "all",
+            "required": false
         }
     },
     "tools": [
@@ -58,6 +66,14 @@
         {
             "name": "open-and-read-tab",
             "description": "Open a URL, wait until rendered, return its text in one call"
+        },
+        {
+            "name": "read-tabs",
+            "description": "Read several open tabs in one call, failures reported per tab"
+        },
+        {
+            "name": "search-tab",
+            "description": "Find text in an open tab and return snippets with offsets"
         },
         {
             "name": "open-browser-tab",
