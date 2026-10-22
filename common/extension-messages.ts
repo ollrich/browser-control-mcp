@@ -77,6 +77,14 @@ export interface CurrentTabExtensionMessage extends ExtensionMessageBase {
   tab: BrowserTab;
 }
 
+export interface ScreenshotExtensionMessage extends ExtensionMessageBase {
+  resource: "screenshot";
+  tabId: number;
+  // Base64-encoded image, without the data-URL prefix
+  imageData: string;
+  mimeType: string;
+}
+
 export type ExtensionMessage =
   | TabContentExtensionMessage
   | TabsExtensionMessage
@@ -87,7 +95,8 @@ export type ExtensionMessage =
   | FindHighlightExtensionMessage
   | TabsClosedExtensionMessage
   | TabGroupCreatedExtensionMessage
-  | CurrentTabExtensionMessage;
+  | CurrentTabExtensionMessage
+  | ScreenshotExtensionMessage;
 
 export interface ExtensionError {
   correlationId: string;

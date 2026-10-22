@@ -59,6 +59,11 @@ export const AVAILABLE_TOOLS: ToolInfo[] = [
     id: "get-current-tab",
     name: "Get Current Tab",
     description: "Allows the MCP server to get information about the currently active tab"
+  },
+  {
+    id: "capture-tab-screenshot",
+    name: "Capture Tab Screenshot",
+    description: "Allows the MCP server to capture a screenshot of a tab, after you authorize that tab with the toolbar button"
   }
 ];
 
@@ -74,6 +79,7 @@ export const COMMAND_TO_TOOL_ID: Record<ServerMessageRequest["cmd"], string> = {
   "find-highlight": "find-highlight-in-browser-tab",
   "group-tabs": "reorder-browser-tabs",
   "get-current-tab": "get-current-tab",
+  "capture-screenshot": "capture-tab-screenshot",
 };
 
 // Storage schema for tool settings

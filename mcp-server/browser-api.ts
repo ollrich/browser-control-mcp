@@ -5,6 +5,7 @@ import type {
   BrowserHistoryItem,
   ServerMessage,
   TabContentExtensionMessage,
+  ScreenshotExtensionMessage,
   ServerMessageRequest,
   ExtensionError,
 } from "@browser-control-mcp/common";
@@ -32,6 +33,9 @@ export { BROWSER_TRANSPORT_MODES } from "./browser-transport";
 
 const WS_DEFAULT_PORT = 8089;
 const EXTENSION_RESPONSE_TIMEOUT_MS = 5000;
+// Capturing may foreground the tab, wait for it to paint, encode the image and transfer a
+// payload orders of magnitude larger than the other responses.
+const SCREENSHOT_RESPONSE_TIMEOUT_MS = 10_000;
 const WS_OPEN_WAIT_TIMEOUT_MS = 10_000;
 const WS_OPEN_POLL_INTERVAL_MS = 100;
 const BROKER_REQUEST_TIMEOUT_MS = 15_000;
@@ -251,6 +255,28 @@ export class BrowserAPI {
       });
       const message = await this.waitForResponse(correlationId, "new-tab-group");
       return message.groupId;
+    });
+  }
+
+  async captureScreenshot(
+    tabId: number,
+    format: "jpeg" | "png",
+    quality: number,
+    scale: number
+  ): Promise<ScreenshotExtensionMessage> {
+    return this.run("captureScreenshot", [tabId, format, quality, scale], async () => {
+      const correlationId = await this.sendMessageToExtension({
+        cmd: "capture-screenshot",
+        tabId,
+        format,
+        quality,
+        scale,
+      });
+      return await this.waitForResponse(
+        correlationId,
+        "screenshot",
+        SCREENSHOT_RESPONSE_TIMEOUT_MS
+      );
     });
   }
 
@@ -498,6 +524,13 @@ export class BrowserAPI {
           args[1] as boolean,
           args[2] as string,
           args[3] as string
+        );
+      case "captureScreenshot":
+        return await this.captureScreenshot(
+          args[0] as number,
+          args[1] as "jpeg" | "png",
+          args[2] as number,
+          args[3] as number
         );
       default: {
         const exhaustiveCheck: never = operation;

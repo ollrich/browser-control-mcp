@@ -55,6 +55,14 @@ export interface GetCurrentTabServerMessage extends ServerMessageBase {
   cmd: "get-current-tab";
 }
 
+export interface CaptureScreenshotServerMessage extends ServerMessageBase {
+  cmd: "capture-screenshot";
+  tabId: number;
+  format?: "jpeg" | "png";
+  quality?: number;
+  scale?: number;
+}
+
 export type ServerMessage =
   | OpenTabServerMessage
   | CloseTabsServerMessage
@@ -65,6 +73,7 @@ export type ServerMessage =
   | ReorderTabsServerMessage
   | FindHighlightServerMessage
   | GroupTabsServerMessage
-  | GetCurrentTabServerMessage;
+  | GetCurrentTabServerMessage
+  | CaptureScreenshotServerMessage;
 
 export type ServerMessageRequest = ServerMessage & { correlationId: string };

@@ -9,6 +9,7 @@ export const BROWSER_API_OPERATIONS = [
   "reorderTabs",
   "findHighlight",
   "groupTabs",
+  "captureScreenshot",
 ] as const;
 
 export type BrowserApiOperation = (typeof BROWSER_API_OPERATIONS)[number];

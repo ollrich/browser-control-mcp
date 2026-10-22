@@ -40,6 +40,7 @@ test("browser operation whitelist is stable for broker forwarding", () => {
     "reorderTabs",
     "findHighlight",
     "groupTabs",
+    "captureScreenshot",
   ]);
   assert.equal(browserApi.isBrowserApiOperation("getTabList"), true);
   assert.equal(browserApi.isBrowserApiOperation("constructor"), false);

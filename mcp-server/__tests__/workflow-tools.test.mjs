@@ -176,9 +176,9 @@ after(async () => {
   ext?.close();
 });
 
-test("tool list includes the workflow tools", async () => {
+test("tool list includes the workflow and screenshot tools", async () => {
   const tools = (await leader.listTools()).tools.map((x) => x.name);
-  for (const name of ["read-tab", "open-and-read-tab"]) {
+  for (const name of ["read-tab", "open-and-read-tab", "capture-tab-screenshot"]) {
     assert.ok(tools.includes(name), name);
   }
 });
