@@ -335,12 +335,25 @@ test("maxChars beyond one extension chunk fetches the following chunks", async (
     assert.doesNotMatch(text, /offset=/, "whole page in one call");
     assert.equal((text.match(/Pocket FM grew a lot\./g) ?? []).length, 30);
 
+    // The default cap is far above this small page, so it arrives whole as well.
     res = await leader.callTool({ name: "read-tab", arguments: { tabId: 1 } });
-    text = textOf(res);
-    assert.match(text, /Page text is truncated\. Call read-tab with tabId=1 and offset=100/);
+    assert.doesNotMatch(textOf(res), /offset=/);
+
+    res = await leader.callTool({ name: "read-tab", arguments: { tabId: 1, maxChars: 50 } });
+    assert.match(textOf(res), /Output was cut at maxChars=50\. Call read-tab with tabId=1 and offset=\d+/);
   } finally {
     state.pageCap = 50_000;
   }
+});
+
+test("without maxChars a reply stays at 40000 characters and names the offset", async () => {
+  state.tabs.push({ id: 8, url: "https://long.example/book", title: "Long book", lastAccessed: 5, status: "complete", text: "word ".repeat(12_000) });
+  const res = await leader.callTool({ name: "read-tab", arguments: { tabId: 8 } });
+  const text = textOf(res);
+  // The cut lands on a space, so reading on starts right after the last word.
+  assert.match(text, /characters 0-39999 of 60000/);
+  assert.match(text, /Output was cut at maxChars=40000\. Call read-tab with tabId=8 and offset=39999/);
+  assert.equal(res.content[res.content.length - 1].text.length, 40_000);
 });
 
 test("a second session forwards through the broker", async () => {

@@ -381,6 +381,9 @@ const CONSENT_ERROR = /not yet granted permission to access the domain/i;
 // The extension returns one chunk of about 50k raw characters per call; with a
 // larger maxChars further chunks are fetched, up to this many.
 const MAX_CHUNKS_PER_READ = 10;
+// MCP clients offload or cut tool replies from about 50 KB on (Claude Code
+// saves them to a file), so a reply stays below that unless asked otherwise.
+const DEFAULT_MAX_CHARS = 40_000;
 
 const slimParams = {
   includeLinks: z
@@ -391,10 +394,11 @@ const slimParams = {
   maxChars: z
     .number()
     .int()
-    .min(0)
-    .default(0)
+    .min(1)
+    .max(MAX_CHUNKS_PER_READ * 50_000)
+    .default(DEFAULT_MAX_CHARS)
     .describe(
-      "Cap on returned characters. 0 = one chunk of about 50k raw characters. Larger values fetch further chunks until the cap or the page end. The reply names the offset to continue from."
+      `Cap on returned characters (default ${DEFAULT_MAX_CHARS}; MCP clients offload or cut much larger replies). The reply names the offset to continue from. Values above one extension chunk (about 50k raw characters) fetch the following chunks.`
     ),
   consentWaitMs: z
     .number()
@@ -684,7 +688,8 @@ mcpServer.tool(
   "read-tab",
   `Read the text of an open tab in one step, found by URL or title fragment (or by tabId).
    Without match and tabId it reads the active tab. Prefer this over
-   get-list-of-open-tabs followed by get-tab-web-content.`,
+   get-list-of-open-tabs followed by get-tab-web-content. Long pages come in parts of
+   up to maxChars characters; continue with the offset named in the reply.`,
   {
     match: z
       .string()
@@ -760,7 +765,9 @@ mcpServer.tool(
 mcpServer.tool(
   "open-and-read-tab",
   `Open an https URL in a new tab, wait until it has loaded and rendered, and return its text
-   in one call. Use for live pages where a plain web fetch returns stale or empty content.`,
+   in one call. Use for live pages where a plain web fetch returns stale or empty content.
+   Long pages come in parts of up to maxChars characters; keep the tab open (closeAfter=false)
+   to read on with read-tab and the offset named in the reply.`,
   {
     url: z.string().describe("https URL; bare domains get https:// and http:// is upgraded"),
     settleMs: z
