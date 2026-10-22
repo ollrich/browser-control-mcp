@@ -19,6 +19,11 @@ export interface BrowserTab {
   lastAccessed?: number;
   // Firefox sends the full tabs.Tab object; status is "loading" or "complete".
   status?: string;
+  active?: boolean;
+  windowId?: number;
+  // Unloaded tab (lazy session restore or memory pressure); scripts cannot run in it.
+  discarded?: boolean;
+  hidden?: boolean;
 }
 
 export interface TabsExtensionMessage extends ExtensionMessageBase {

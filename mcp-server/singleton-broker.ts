@@ -9,6 +9,9 @@ import { isBrowserApiOperation } from "./browser-operations";
 
 export const BROKER_PROTOCOL_VERSION = 1;
 
+// sun_path holds 104 bytes on macOS and 108 on Linux, including the trailing NUL.
+const MAX_UNIX_SOCKET_PATH_BYTES = 103;
+
 export interface BrokerIdentity {
   id: string;
   port: number;
@@ -66,11 +69,45 @@ export function getBrokerSocketPath(identity: BrokerIdentity): string {
     return `\\\\.\\pipe\\browser-control-mcp-${identity.id}`;
   }
 
-  return path.join(getBrokerDirectory(), `leader-${identity.id}.sock`);
+  const preferred = path.join(getBrokerDirectory(), `leader-${identity.id}.sock`);
+  if (Buffer.byteLength(preferred) <= MAX_UNIX_SOCKET_PATH_BYTES) {
+    return preferred;
+  }
+
+  // Long home directories (sandboxes, test runners) overflow sun_path and make
+  // listen() fail with EINVAL. Fall back to a short per-user directory.
+  const fileName = `${identity.id}.sock`;
+  for (const base of [os.tmpdir(), "/tmp"]) {
+    const candidate = path.join(base, `bcm-${getUserTag()}`, fileName);
+    if (Buffer.byteLength(candidate) <= MAX_UNIX_SOCKET_PATH_BYTES) {
+      return candidate;
+    }
+  }
+  return preferred;
+}
+
+function getUserTag(): string {
+  return typeof process.getuid === "function" ? String(process.getuid()) : os.userInfo().username;
 }
 
 export function ensureBrokerDirectory(): void {
   fs.mkdirSync(getBrokerDirectory(), { recursive: true, mode: 0o700 });
+}
+
+function ensureSocketDirectory(socketPath: string): void {
+  const directory = path.dirname(socketPath);
+  fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+  if (directory === getBrokerDirectory()) {
+    return;
+  }
+
+  // The fallback lives in a shared temp directory: refuse one that another
+  // user created or that others can write to.
+  const stats = fs.lstatSync(directory);
+  const ownedByUs = typeof process.getuid !== "function" || stats.uid === process.getuid();
+  if (!stats.isDirectory() || !ownedByUs || (stats.mode & 0o022) !== 0) {
+    throw new Error(`Refusing insecure broker socket directory ${directory}`);
+  }
 }
 
 export function createBrokerToken(): string {
@@ -139,6 +176,7 @@ export function createBrokerServer(options: {
     async start(): Promise<void> {
       ensureBrokerDirectory();
       if (process.platform !== "win32") {
+        ensureSocketDirectory(options.socketPath);
         try {
           fs.unlinkSync(options.socketPath);
         } catch {

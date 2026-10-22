@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import net from "node:net";
 import test from "node:test";
 import WebSocket from "ws";
@@ -273,6 +274,55 @@ test("BrowserAPI close disconnects the accepted extension WebSocket", async () =
     if (client.readyState === WebSocket.OPEN || client.readyState === WebSocket.CONNECTING) {
       client.close();
     }
+    if (previousSecret === undefined) delete process.env.EXTENSION_SECRET;
+    else process.env.EXTENSION_SECRET = previousSecret;
+    if (previousPort === undefined) delete process.env.EXTENSION_PORT;
+    else process.env.EXTENSION_PORT = previousPort;
+    if (previousContainerized === undefined) delete process.env.CONTAINERIZED;
+    else process.env.CONTAINERIZED = previousContainerized;
+  }
+});
+
+test("BrowserAPI retries setup once a busy port without broker becomes free", async () => {
+  const previousSecret = process.env.EXTENSION_SECRET;
+  const previousPort = process.env.EXTENSION_PORT;
+  const previousContainerized = process.env.CONTAINERIZED;
+  const blocker = net.createServer();
+
+  await new Promise((resolve, reject) => {
+    blocker.once("error", reject);
+    blocker.listen(0, "localhost", resolve);
+  });
+  const port = blocker.address().port;
+  const secret = `secret-${port}`;
+
+  process.env.EXTENSION_SECRET = secret;
+  process.env.EXTENSION_PORT = String(port);
+  delete process.env.CONTAINERIZED;
+
+  const api = new BrowserAPI();
+  let extension;
+  try {
+    await api.init();
+    await assert.rejects(api.getTabList(), /already in use/);
+
+    await new Promise((resolve) => blocker.close(resolve));
+    // A fake extension that connects once the session has taken over the port.
+    setTimeout(() => {
+      extension = new WebSocket(`ws://127.0.0.1:${port}`);
+      extension.on("message", (raw) => {
+        const { payload } = JSON.parse(raw.toString());
+        const reply = { resource: "tabs", correlationId: payload.correlationId, tabs: [{ id: 9 }] };
+        const signature = crypto.createHmac("sha256", secret).update(JSON.stringify(reply)).digest("hex");
+        extension.send(JSON.stringify({ payload: reply, signature }));
+      });
+    }, 300);
+
+    assert.deepEqual(await api.getTabList(), [{ id: 9 }]);
+  } finally {
+    extension?.close();
+    await api.close();
+    if (blocker.listening) await new Promise((resolve) => blocker.close(resolve));
     if (previousSecret === undefined) delete process.env.EXTENSION_SECRET;
     else process.env.EXTENSION_SECRET = previousSecret;
     if (previousPort === undefined) delete process.env.EXTENSION_PORT;

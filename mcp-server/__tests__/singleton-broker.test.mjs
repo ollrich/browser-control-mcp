@@ -132,3 +132,30 @@ test("broker server close removes the socket file before resolving", async () =>
   await server.close();
   assert.equal(await broker.socketPathExists(socketPath), false);
 });
+
+test("broker socket falls back to a short path when HOME is too long for unix sockets", async () => {
+  if (process.platform === "win32") {
+    return;
+  }
+
+  const previousHome = process.env.HOME;
+  process.env.HOME = path.join(os.tmpdir(), "a-very-long-home-directory-name".repeat(3));
+  try {
+    const identity = broker.createBrokerIdentity({ port: 18095, extensionSecret: "secret-a" });
+    const socketPath = broker.getBrokerSocketPath(identity);
+    assert.ok(Buffer.byteLength(socketPath) <= 103, socketPath);
+    assert.ok(!socketPath.startsWith(process.env.HOME), "left the long home directory");
+
+    const token = broker.createBrokerToken();
+    const server = broker.createBrokerServer({ socketPath, token, handleOperation: async () => "ok" });
+    await server.start();
+    try {
+      assert.equal(await broker.pingBroker({ socketPath, token, timeoutMs: 1000 }), true);
+    } finally {
+      await server.close();
+    }
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME;
+    else process.env.HOME = previousHome;
+  }
+});

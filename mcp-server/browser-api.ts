@@ -11,6 +11,7 @@ import type {
 import { isPortInUse } from "./util";
 import * as crypto from "crypto";
 import type { BrowserApiOperation } from "./browser-operations";
+import { pickActiveTab } from "./content-utils";
 import {
   BROKER_PROTOCOL_VERSION,
   type BrokerIdentity,
@@ -74,6 +75,7 @@ export class BrowserAPI {
   private brokerInfo: BrokerInfo | null = null;
   private brokerServer: ReturnType<typeof createBrokerServer> | null = null;
   private selectedPort: number | null = null;
+  private recovery: Promise<void> | null = null;
 
   // Map to persist the request to the extension. It maps the request correlationId
   // to a resolver, fulfulling a promise created when sending a message to the extension.
@@ -90,33 +92,10 @@ export class BrowserAPI {
       );
     }
     this.sharedSecret = secret;
-    const identity = createBrokerIdentity({ port, extensionSecret: secret });
-    this.brokerIdentity = identity;
+    this.brokerIdentity = createBrokerIdentity({ port, extensionSecret: secret });
     this.selectedPort = port;
 
-    if (await isPortInUse(port)) {
-      const brokerInfo = readBrokerInfo(identity);
-      if (
-        brokerInfo &&
-        await pingBroker({
-          socketPath: brokerInfo.socketPath,
-          token: brokerInfo.token,
-          timeoutMs: 1000,
-        })
-      ) {
-        this.brokerInfo = brokerInfo;
-        console.error(
-          `browser-control: forwarding browser tools for ${identity.id} to broker process ${brokerInfo.pid}`
-        );
-        return;
-      }
-
-      this.unavailableReason = buildPortInUseMessage(port);
-      console.error(this.unavailableReason);
-      return;
-    }
-
-    await this.becomeLeader(identity, port);
+    await this.connectOrLead();
   }
 
   async close(): Promise<void> {
@@ -153,127 +132,107 @@ export class BrowserAPI {
   }
 
   async openTab(url: string): Promise<number | undefined> {
-    if (this.isForwarding()) {
-      return await this.forwardOperation("openTab", [url]) as number | undefined;
-    }
-
-    const correlationId = await this.sendMessageToExtension({
-      cmd: "open-tab",
-      url,
+    return this.run("openTab", [url], async () => {
+      const correlationId = await this.sendMessageToExtension({
+        cmd: "open-tab",
+        url,
+      });
+      const message = await this.waitForResponse(correlationId, "opened-tab-id");
+      return message.tabId;
     });
-    const message = await this.waitForResponse(correlationId, "opened-tab-id");
-    return message.tabId;
   }
 
-  async closeTabs(tabIds: number[]) {
-    if (this.isForwarding()) {
-      await this.forwardOperation("closeTabs", [tabIds]);
-      return;
-    }
-
-    const correlationId = await this.sendMessageToExtension({
-      cmd: "close-tabs",
-      tabIds,
+  async closeTabs(tabIds: number[]): Promise<void> {
+    await this.run("closeTabs", [tabIds], async () => {
+      const correlationId = await this.sendMessageToExtension({
+        cmd: "close-tabs",
+        tabIds,
+      });
+      await this.waitForResponse(correlationId, "tabs-closed");
     });
-    await this.waitForResponse(correlationId, "tabs-closed");
   }
 
   async getTabList(): Promise<BrowserTab[]> {
-    if (this.isForwarding()) {
-      return await this.forwardOperation("getTabList", []) as BrowserTab[];
-    }
-
-    const correlationId = await this.sendMessageToExtension({
-      cmd: "get-tab-list",
+    return this.run("getTabList", [], async () => {
+      const correlationId = await this.sendMessageToExtension({
+        cmd: "get-tab-list",
+      });
+      const message = await this.waitForResponse(correlationId, "tabs");
+      return message.tabs;
     });
-    const message = await this.waitForResponse(correlationId, "tabs");
-    return message.tabs;
   }
 
+  // Served from the tab list (Firefox sends full tabs.Tab objects), so it also works
+  // with extension builds that lack the get-current-tab command. The stock add-on
+  // rejects unknown commands as "disabled in extension settings".
   async getCurrentTab(): Promise<BrowserTab> {
-    if (this.isForwarding()) {
-      return await this.forwardOperation("getCurrentTab", []) as BrowserTab;
+    const tab = pickActiveTab(await this.getTabList());
+    if (!tab) {
+      throw new Error("No open tab found");
     }
-
-    const correlationId = await this.sendMessageToExtension({
-      cmd: "get-current-tab",
-    });
-    const message = await this.waitForResponse(correlationId, "current-tab");
-    return message.tab;
+    return tab;
   }
 
+  // Same approach as getCurrentTab: tabs.query returns the same object as tabs.get.
   async getTabMetadata(tabId: number): Promise<Record<string, unknown>> {
-    if (this.isForwarding()) {
-      return await this.forwardOperation("getTabMetadata", [tabId]) as Record<string, unknown>;
+    const tab = (await this.getTabList()).find((t) => t.id === tabId);
+    if (!tab) {
+      throw new Error(`No open tab with id ${tabId}`);
     }
-
-    const correlationId = await this.sendMessageToExtension({
-      cmd: "get-tab-metadata",
-      tabId,
-    });
-    const message = await this.waitForResponse(correlationId, "tab-metadata");
-    return message.metadata;
+    return tab as Record<string, unknown>;
   }
 
   async getBrowserRecentHistory(
     searchQuery?: string
   ): Promise<BrowserHistoryItem[]> {
-    if (this.isForwarding()) {
-      return await this.forwardOperation("getBrowserRecentHistory", [searchQuery]) as BrowserHistoryItem[];
-    }
-
-    const correlationId = await this.sendMessageToExtension({
-      cmd: "get-browser-recent-history",
-      searchQuery,
+    return this.run("getBrowserRecentHistory", [searchQuery], async () => {
+      const correlationId = await this.sendMessageToExtension({
+        cmd: "get-browser-recent-history",
+        searchQuery,
+      });
+      const message = await this.waitForResponse(correlationId, "history");
+      return message.historyItems;
     });
-    const message = await this.waitForResponse(correlationId, "history");
-    return message.historyItems;
   }
 
   async getTabContent(
     tabId: number,
     offset: number
   ): Promise<TabContentExtensionMessage> {
-    if (this.isForwarding()) {
-      return await this.forwardOperation("getTabContent", [tabId, offset]) as TabContentExtensionMessage;
-    }
-
-    const correlationId = await this.sendMessageToExtension({
-      cmd: "get-tab-content",
-      tabId,
-      offset,
+    return this.run("getTabContent", [tabId, offset], async () => {
+      const correlationId = await this.sendMessageToExtension({
+        cmd: "get-tab-content",
+        tabId,
+        offset,
+      });
+      return await this.waitForResponse(correlationId, "tab-content");
     });
-    return await this.waitForResponse(correlationId, "tab-content");
   }
 
   async reorderTabs(tabOrder: number[]): Promise<number[]> {
-    if (this.isForwarding()) {
-      return await this.forwardOperation("reorderTabs", [tabOrder]) as number[];
-    }
-
-    const correlationId = await this.sendMessageToExtension({
-      cmd: "reorder-tabs",
-      tabOrder,
+    return this.run("reorderTabs", [tabOrder], async () => {
+      const correlationId = await this.sendMessageToExtension({
+        cmd: "reorder-tabs",
+        tabOrder,
+      });
+      const message = await this.waitForResponse(correlationId, "tabs-reordered");
+      return message.tabOrder;
     });
-    const message = await this.waitForResponse(correlationId, "tabs-reordered");
-    return message.tabOrder;
   }
 
   async findHighlight(tabId: number, queryPhrase: string): Promise<number> {
-    if (this.isForwarding()) {
-      return await this.forwardOperation("findHighlight", [tabId, queryPhrase]) as number;
-    }
-
-    const correlationId = await this.sendMessageToExtension({
-      cmd: "find-highlight",
-      tabId,
-      queryPhrase,
+    return this.run("findHighlight", [tabId, queryPhrase], async () => {
+      const correlationId = await this.sendMessageToExtension({
+        cmd: "find-highlight",
+        tabId,
+        queryPhrase,
+      });
+      const message = await this.waitForResponse(
+        correlationId,
+        "find-highlight-result"
+      );
+      return message.noOfResults;
     });
-    const message = await this.waitForResponse(
-      correlationId,
-      "find-highlight-result"
-    );
-    return message.noOfResults;
   }
 
   async groupTabs(
@@ -282,19 +241,33 @@ export class BrowserAPI {
     groupColor: string,
     groupTitle: string
   ): Promise<number> {
-    if (this.isForwarding()) {
-      return await this.forwardOperation("groupTabs", [tabIds, isCollapsed, groupColor, groupTitle]) as number;
-    }
-
-    const correlationId = await this.sendMessageToExtension({
-      cmd: "group-tabs",
-      tabIds,
-      isCollapsed,
-      groupColor,
-      groupTitle,
+    return this.run("groupTabs", [tabIds, isCollapsed, groupColor, groupTitle], async () => {
+      const correlationId = await this.sendMessageToExtension({
+        cmd: "group-tabs",
+        tabIds,
+        isCollapsed,
+        groupColor,
+        groupTitle,
+      });
+      const message = await this.waitForResponse(correlationId, "new-tab-group");
+      return message.groupId;
     });
-    const message = await this.waitForResponse(correlationId, "new-tab-group");
-    return message.groupId;
+  }
+
+  // Routes an operation: retry setup if this session could not start, forward to
+  // the broker when another session owns the browser port, else talk directly.
+  private async run<T>(
+    operation: BrowserApiOperation,
+    args: unknown[],
+    direct: () => Promise<T>
+  ): Promise<T> {
+    if (this.unavailableReason) {
+      await this.recover();
+    }
+    if (this.isForwarding()) {
+      return await this.forwardOperation(operation, args) as T;
+    }
+    return await direct();
   }
 
   private isForwarding(): boolean {
@@ -302,10 +275,6 @@ export class BrowserAPI {
   }
 
   private async forwardOperation(operation: BrowserApiOperation, args: unknown[]): Promise<unknown> {
-    if (!this.brokerInfo) {
-      throw new Error("Browser broker forwarding is not initialized");
-    }
-
     try {
       return await this.forwardToCurrentBroker(operation, args);
     } catch (error) {
@@ -313,7 +282,7 @@ export class BrowserAPI {
         operation,
         error: error instanceof Error ? error.message : String(error),
       });
-      await this.recoverBrokerConnection();
+      await this.recover();
       if (this.isForwarding()) {
         return await this.forwardToCurrentBroker(operation, args);
       }
@@ -335,32 +304,53 @@ export class BrowserAPI {
     });
   }
 
-  private async recoverBrokerConnection(): Promise<void> {
+  // Single flight, so concurrent tool calls do not race to become leader.
+  private recover(): Promise<void> {
+    if (!this.recovery) {
+      this.recovery = this.connectOrLead().finally(() => {
+        this.recovery = null;
+      });
+    }
+    return this.recovery;
+  }
+
+  // Forward to the live broker when the browser port is taken, become the leader
+  // when it is free. Otherwise record why this session cannot reach the browser;
+  // the next tool call tries again.
+  private async connectOrLead(): Promise<void> {
     if (!this.brokerIdentity || !this.selectedPort) {
       throw new Error("Browser broker identity is not initialized");
     }
+    const identity = this.brokerIdentity;
+    const port = this.selectedPort;
 
-    const latestBrokerInfo = readBrokerInfo(this.brokerIdentity);
-    if (
-      latestBrokerInfo &&
-      await pingBroker({
-        socketPath: latestBrokerInfo.socketPath,
-        token: latestBrokerInfo.token,
-        timeoutMs: 1000,
-      })
-    ) {
-      this.brokerInfo = latestBrokerInfo;
+    if (await isPortInUse(port)) {
+      const brokerInfo = readBrokerInfo(identity);
+      if (
+        brokerInfo &&
+        await pingBroker({
+          socketPath: brokerInfo.socketPath,
+          token: brokerInfo.token,
+          timeoutMs: 1000,
+        })
+      ) {
+        this.brokerInfo = brokerInfo;
+        this.unavailableReason = null;
+        console.error(
+          `browser-control: forwarding browser tools for ${identity.id} to broker process ${brokerInfo.pid}`
+        );
+        return;
+      }
+
+      this.brokerInfo = null;
+      this.unavailableReason = buildPortInUseMessage(port);
+      console.error(this.unavailableReason);
       return;
     }
 
-    if (await isPortInUse(this.selectedPort)) {
-      throw new Error(
-        `Browser broker is unavailable and port ${this.selectedPort} is still in use. ` +
-          "Restart this MCP server session after the current owner exits."
-      );
-    }
-
-    await this.becomeLeader(this.brokerIdentity, this.selectedPort);
+    this.brokerInfo = null;
+    this.unavailableReason = null;
+    await this.becomeLeader(identity, port);
   }
 
   private async becomeLeader(identity: BrokerIdentity, port: number): Promise<void> {
@@ -460,12 +450,24 @@ export class BrowserAPI {
       startedAt: Date.now(),
     };
 
-    this.brokerServer = createBrokerServer({
+    const brokerServer = createBrokerServer({
       socketPath,
       token,
       handleOperation: (operation, args) => this.dispatchOperation(operation, args),
     });
-    await this.brokerServer.start();
+    try {
+      await brokerServer.start();
+    } catch (error) {
+      // The extension connection works without the broker; only other sessions
+      // lose the ability to forward to this one.
+      console.error(
+        `browser-control: could not start the session broker at ${socketPath}; ` +
+          "other MCP sessions cannot share this browser connection.",
+        error
+      );
+      return;
+    }
+    this.brokerServer = brokerServer;
     writeBrokerInfo(info);
     this.brokerInfo = info;
   }
@@ -521,7 +523,7 @@ export class BrowserAPI {
 
     await this.waitForWebSocketOpen();
 
-    const correlationId = Math.random().toString(36).substring(2);
+    const correlationId = crypto.randomUUID();
     const req: ServerMessageRequest = { ...message, correlationId };
     const payload = JSON.stringify(req);
     const signature = this.createSignature(payload);
@@ -629,30 +631,37 @@ export class BrowserAPI {
 
   private async waitForResponse<T extends ExtensionMessage["resource"]>(
     correlationId: string,
-    resource: T
+    resource: T,
+    timeoutMs: number = EXTENSION_RESPONSE_TIMEOUT_MS
   ): Promise<Extract<ExtensionMessage, { resource: T }>> {
     return new Promise<Extract<ExtensionMessage, { resource: T }>>(
       (resolve, reject) => {
-        this.extensionRequestMap.set(correlationId, {
-          resolve: resolve as (value: ExtensionMessage) => void,
-          resource,
-          reject,
-        });
-        setTimeout(() => {
+        const timeout = setTimeout(() => {
           if (this.extensionRequestMap.has(correlationId)) {
             this.extensionRequestMap.delete(correlationId);
             trace("Response timeout", {
               correlationId,
               resource,
-              timeoutMs: EXTENSION_RESPONSE_TIMEOUT_MS,
+              timeoutMs,
               wsState: this.ws?.readyState ?? "null",
             });
             reject(
               `Timed out waiting for response (resource=${resource}, ` +
-                `timeout=${EXTENSION_RESPONSE_TIMEOUT_MS}ms, correlationId=${correlationId})`
+                `timeout=${timeoutMs}ms, correlationId=${correlationId})`
             );
           }
-        }, EXTENSION_RESPONSE_TIMEOUT_MS);
+        }, timeoutMs);
+        this.extensionRequestMap.set(correlationId, {
+          resolve: ((value: ExtensionMessage) => {
+            clearTimeout(timeout);
+            resolve(value as Extract<ExtensionMessage, { resource: T }>);
+          }) as (value: ExtensionMessage) => void,
+          resource,
+          reject: (reason?: string) => {
+            clearTimeout(timeout);
+            reject(reason);
+          },
+        });
       }
     );
   }

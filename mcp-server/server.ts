@@ -4,34 +4,55 @@ import { z } from "zod";
 import { BrowserAPI } from "./browser-api";
 import dayjs from "dayjs";
 import relativeTime from "dayjs/plugin/relativeTime";
-import type { BrowserTab } from "@browser-control-mcp/common";
-import { compactText, formatTabLine, matchTabs, slimContent } from "./content-utils";
+import type { BrowserTab, TabContentExtensionMessage } from "@browser-control-mcp/common";
+import fs from "fs";
+import path from "path";
+import {
+  compactText,
+  formatTabLine,
+  isConsentTabFor,
+  matchTabs,
+  normalizeOpenUrl,
+  pickActiveTab,
+  slimContent,
+} from "./content-utils";
 
 dayjs.extend(relativeTime);
 
+function readPackageVersion(): string {
+  try {
+    const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "package.json"), "utf8"));
+    return typeof pkg.version === "string" ? pkg.version : "0.0.0";
+  } catch {
+    return "0.0.0";
+  }
+}
+
 const mcpServer = new McpServer({
   name: "BrowserControl",
-  version: "1.6.1-ollie.1",
+  version: readPackageVersion(),
 });
 
 mcpServer.tool(
   "open-browser-tab",
   "Open a new tab in the user's browser (useful when the user asks to open a website)",
   { url: z.string() },
-  async ({ url }) => {
+  async ({ url: input }) => {
+    const { url, note } = normalizeOpenUrl(input);
     const openedTabId = await browserApi.openTab(url);
     if (openedTabId !== undefined) {
       return {
         content: [
           {
             type: "text",
-            text: `${url} opened in tab id ${openedTabId}`,
+            text: `${url} opened in tab id ${openedTabId}${note ? `. ${note}` : ""}`,
           },
         ],
       };
     } else {
       return {
-        content: [{ type: "text", text: "Failed to open tab", isError: true }],
+        content: [{ type: "text", text: "Failed to open tab" }],
+        isError: true,
       };
     }
   }
@@ -275,11 +296,23 @@ mcpServer.tool(
 
 // ---------------------------------------------------------------------------
 // Workflow tools (fork additions). They only combine the original extension
-// commands open-tab, get-tab-list and get-tab-content, so they work with the
-// stock Firefox add-on from addons.mozilla.org and through broker forwarding.
+// commands open-tab, get-tab-list, get-tab-content and close-tabs, so they work
+// with the stock Firefox add-on from addons.mozilla.org and through broker
+// forwarding.
 // ---------------------------------------------------------------------------
 
 type TextContent = { type: "text"; text: string };
+
+const DEFAULT_SETTLE_MS = 1000;
+const DEFAULT_MAX_SETTLE_MS = 8000;
+const DEFAULT_LOAD_TIMEOUT_MS = 20_000;
+const DEFAULT_CONSENT_WAIT_MS = 30_000;
+// Below this many characters a page probably is an unrendered script shell.
+const MIN_RENDERED_CHARS = 300;
+const CONSENT_POLL_MS = 1500;
+// Never seeing the consent tab means the extension works differently; stop waiting.
+const CONSENT_TAB_GRACE_MS = 4000;
+const CONSENT_ERROR = /not yet granted permission to access the domain/i;
 
 const slimParams = {
   includeLinks: z
@@ -292,60 +325,181 @@ const slimParams = {
     .int()
     .min(0)
     .default(0)
-    .describe("Optional extra cap on returned characters (0 = only the extension's 50k page cap)."),
+    .describe("Optional extra cap on returned characters (0 = only the extension's 50k page cap). The reply names the offset to continue from."),
+  consentWaitMs: z
+    .number()
+    .int()
+    .min(0)
+    .max(120_000)
+    .default(DEFAULT_CONSENT_WAIT_MS)
+    .describe("How long to wait for the user to grant access when a domain is read for the first time (0 = fail right away)"),
 };
+
+interface SlimReadOptions {
+  includeLinks: boolean;
+  maxLinks: number;
+  maxChars: number;
+  consentWaitMs: number;
+}
+
+interface OpenReadOptions extends SlimReadOptions {
+  offset: number;
+  settleMs: number;
+  maxSettleMs: number;
+  timeoutMs: number;
+  closeAfter: boolean;
+}
+
+// The page still waits for the user's domain consent; the tab is worth keeping.
+class ConsentPendingError extends Error {}
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-async function waitForTabComplete(tabId: number, timeoutMs: number): Promise<boolean> {
+function errorText(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+async function waitForTabComplete(
+  tabId: number,
+  timeoutMs: number
+): Promise<{ loaded: boolean; tab: BrowserTab }> {
   const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const tabs = await browserApi.getTabList();
-    const tab = tabs.find((t) => t.id === tabId);
+  let delay = 250;
+  for (;;) {
+    const tab = (await browserApi.getTabList()).find((t) => t.id === tabId);
     if (!tab) {
       throw new Error(`Tab ${tabId} disappeared while loading`);
     }
-    // Older extension builds may omit status; treat that as ready.
-    if (tab.status === undefined || tab.status === "complete") {
-      return true;
+    // Right after tabs.create Firefox can report about:blank as complete before the
+    // navigation starts. Older extension builds may omit status; treat that as ready.
+    if (tab.url !== "about:blank" && (tab.status === undefined || tab.status === "complete")) {
+      return { loaded: true, tab };
     }
-    await sleep(300);
+    if (Date.now() + delay > deadline) {
+      return { loaded: false, tab };
+    }
+    await sleep(delay);
+    // Back off: every poll is a full tab list and an audit log entry in the extension.
+    delay = Math.min(Math.round(delay * 1.5), 1000);
   }
-  return false;
 }
 
-async function readTabSlim(
+// The extension answers the first read of a domain with an error and opens its
+// consent page in a new tab, which closes itself once the user grants access.
+async function waitForConsent(pageUrl: string | undefined, timeoutMs: number): Promise<boolean> {
+  const start = Date.now();
+  let seenConsentTab = false;
+  // Look right away: the consent tab exists before the error arrives, and a quick
+  // click could close it before a delayed first look.
+  for (;;) {
+    const pending = (await browserApi.getTabList()).some((t) => isConsentTabFor(t, pageUrl));
+    const elapsed = Date.now() - start;
+    if (pending) {
+      seenConsentTab = true;
+    } else if (seenConsentTab) {
+      return true;
+    } else if (elapsed > CONSENT_TAB_GRACE_MS) {
+      return false;
+    }
+    if (elapsed + CONSENT_POLL_MS > timeoutMs) {
+      return false;
+    }
+    await sleep(CONSENT_POLL_MS);
+  }
+}
+
+async function fetchTabContent(
   tab: BrowserTab,
   offset: number,
-  opts: { includeLinks: boolean; maxLinks: number; maxChars: number },
-  retryShortAfterMs = 0
-): Promise<TextContent[]> {
+  consentWaitMs: number
+): Promise<TabContentExtensionMessage> {
   const tabId = tab.id as number;
-  let content = await browserApi.getTabContent(tabId, offset);
+  const pendingConsent = (error: unknown) =>
+    new ConsentPendingError(
+      `${errorText(error)} Once the user has granted access, call read-tab with tabId=${tabId}.`
+    );
 
-  // Script heavy pages (X, Bluesky, SPAs) often render after "complete".
-  if (retryShortAfterMs > 0 && compactText(content.fullText).length < 300) {
-    await sleep(retryShortAfterMs);
-    content = await browserApi.getTabContent(tabId, offset);
+  try {
+    return await browserApi.getTabContent(tabId, offset);
+  } catch (error) {
+    if (!CONSENT_ERROR.test(errorText(error))) {
+      throw error;
+    }
+    // Every failed read opens another consent tab, so only retry after the
+    // consent tab has closed.
+    if (consentWaitMs <= 0 || !(await waitForConsent(tab.url, consentWaitMs))) {
+      throw pendingConsent(error);
+    }
+    try {
+      return await browserApi.getTabContent(tabId, offset);
+    } catch (retryError) {
+      throw CONSENT_ERROR.test(errorText(retryError)) ? pendingConsent(retryError) : retryError;
+    }
   }
+}
 
+function lengthsSettled(previous: number, current: number): boolean {
+  return Math.abs(previous - current) <= Math.floor(Math.max(previous, current) * 0.005);
+}
+
+// Script heavy pages (X, Bluesky, SPAs) keep rendering after "complete". Read
+// until the text length stops changing (two matching reads, three while the page
+// still looks like an empty shell) or maxSettleMs runs out.
+async function readWhenStable(
+  tab: BrowserTab,
+  offset: number,
+  maxSettleMs: number,
+  consentWaitMs: number
+): Promise<TabContentExtensionMessage> {
+  let content = await fetchTabContent(tab, offset, consentWaitMs);
+  let length = compactText(content.fullText).length;
+  let matchingReads = 1;
+  let delay = 600;
+  const deadline = Date.now() + maxSettleMs;
+  while (
+    matchingReads < (length >= MIN_RENDERED_CHARS ? 2 : 3) &&
+    Date.now() + delay <= deadline
+  ) {
+    await sleep(delay);
+    delay = Math.min(Math.round(delay * 1.5), 2000);
+    const next = await fetchTabContent(tab, offset, 0);
+    const nextLength = compactText(next.fullText).length;
+    matchingReads = lengthsSettled(length, nextLength) ? matchingReads + 1 : 1;
+    content = next;
+    length = nextLength;
+  }
+  return content;
+}
+
+function formatTabContent(
+  tab: BrowserTab,
+  offset: number,
+  content: TabContentExtensionMessage,
+  opts: SlimReadOptions,
+  tabWillClose = false
+): TextContent[] {
+  const tabId = tab.id as number;
   const slim = slimContent(content.fullText, content.links, {
     ...opts,
     pageUrl: tab.url,
   });
+  // Offsets count raw page characters, so continue after the raw text shown.
+  const end = offset + slim.rawConsumed;
 
   const header: TextContent = {
     type: "text",
-    text: `${formatTabLine(tab)}, characters ${offset}-${offset + content.fullText.length} of ${content.totalLength}`,
+    text: `${formatTabLine(tab)}, characters ${offset}-${end} of ${content.totalLength}`,
   };
   const notes: string[] = [];
-  if (content.isTruncated) {
+  if (slim.cutByMaxChars || content.isTruncated) {
+    const reason = slim.cutByMaxChars
+      ? `Output was cut at maxChars=${opts.maxChars}.`
+      : "Page text is truncated.";
     notes.push(
-      `Page text is truncated. Call read-tab with tabId=${tabId} and offset=${offset + content.fullText.length} for more.`
+      tabWillClose
+        ? `${reason} The tab was closed again; to read on, call open-and-read-tab with closeAfter=false, then read-tab with its tabId and offset=${end}.`
+        : `${reason} Call read-tab with tabId=${tabId} and offset=${end} for more.`
     );
-  }
-  if (slim.cutByMaxChars) {
-    notes.push(`Output was cut at maxChars=${opts.maxChars}.`);
   }
   if (opts.includeLinks && slim.droppedLinks > 0) {
     notes.push(`${slim.droppedLinks} duplicate or surplus links omitted.`);
@@ -363,21 +517,64 @@ async function readTabSlim(
   return result;
 }
 
+async function openAndRead(
+  input: string,
+  opts: OpenReadOptions
+): Promise<{ content: TextContent[]; isError?: boolean }> {
+  const { url, note } = normalizeOpenUrl(input);
+  const tabId = await browserApi.openTab(url);
+  if (tabId === undefined) {
+    return { content: [{ type: "text", text: "Failed to open tab" }], isError: true };
+  }
+
+  let keepOpen = !opts.closeAfter;
+  try {
+    const { loaded, tab: loadedTab } = await waitForTabComplete(tabId, opts.timeoutMs);
+    if (opts.settleMs > 0) await sleep(opts.settleMs);
+
+    let content: TabContentExtensionMessage;
+    try {
+      content = await readWhenStable(loadedTab, opts.offset, opts.maxSettleMs, opts.consentWaitMs);
+    } catch (error) {
+      // Keep the tab, so read-tab can pick it up once the user has granted access.
+      if (error instanceof ConsentPendingError) keepOpen = true;
+      throw error;
+    }
+
+    // Title and final URL (after redirects) are often only known after rendering.
+    const tab = (await browserApi.getTabList()).find((t) => t.id === tabId) ?? loadedTab;
+    const result = formatTabContent(tab, opts.offset, content, opts, !keepOpen);
+    const notes = [
+      note,
+      loaded ? undefined : `Page had not finished loading after ${opts.timeoutMs} ms; content may be incomplete.`,
+      keepOpen ? `Tab stays open as tab id ${tabId}.` : undefined,
+    ].filter(Boolean);
+    if (notes.length) {
+      result.splice(1, 0, { type: "text", text: notes.join(" ") });
+    }
+    return { content: result };
+  } finally {
+    if (!keepOpen) {
+      await browserApi.closeTabs([tabId]).catch(() => undefined);
+    }
+  }
+}
+
 mcpServer.tool(
   "read-tab",
   `Read the text of an open tab in one step, found by URL or title fragment (or by tabId).
-   Without match and tabId it reads the most recently used tab. Prefer this over
+   Without match and tabId it reads the active tab. Prefer this over
    get-list-of-open-tabs followed by get-tab-web-content.`,
   {
     match: z
       .string()
       .optional()
-      .describe("Case insensitive fragment of the tab URL or title, e.g. 'x.com/rohan' or 'Karakeep'"),
+      .describe("Case insensitive fragment(s) of the tab URL or title, e.g. 'x.com/rohan' or 'Karakeep'. Several words must all match."),
     tabId: z.number().optional(),
     offset: z.number().int().min(0).default(0),
     ...slimParams,
   },
-  async ({ match, tabId, offset, includeLinks, maxLinks, maxChars }) => {
+  async ({ match, tabId, offset, ...opts }) => {
     const tabs = await browserApi.getTabList();
     let tab: BrowserTab | undefined;
     let others: BrowserTab[] = [];
@@ -387,24 +584,45 @@ mcpServer.tool(
     } else if (match) {
       ({ best: tab, others } = matchTabs(tabs, match));
     } else {
-      tab = [...tabs]
-        .filter((t) => t.id !== undefined)
-        .sort((a, b) => (b.lastAccessed ?? 0) - (a.lastAccessed ?? 0))[0];
+      tab = pickActiveTab(tabs, true);
     }
 
     if (!tab) {
+      const wanted = tabId !== undefined ? `id ${tabId}` : match ? `"${match}"` : "a web page";
       return {
         content: [
           {
             type: "text",
-            text: `No open tab matches ${tabId !== undefined ? `id ${tabId}` : `"${match}"`}. Use open-and-read-tab to open the URL.`,
+            text: `No open tab matches ${wanted}. Use open-and-read-tab to open the URL.`,
           },
         ],
         isError: true,
       };
     }
 
-    const result = await readTabSlim(tab, offset, { includeLinks, maxLinks, maxChars });
+    let result: TextContent[];
+    if (tab.discarded && tab.url) {
+      // Scripts cannot run in an unloaded tab. Read a fresh copy in a temporary
+      // tab instead of waking the original.
+      const fresh = await openAndRead(tab.url, {
+        ...opts,
+        offset,
+        settleMs: DEFAULT_SETTLE_MS,
+        maxSettleMs: DEFAULT_MAX_SETTLE_MS,
+        timeoutMs: DEFAULT_LOAD_TIMEOUT_MS,
+        closeAfter: true,
+      });
+      if (fresh.isError) return fresh;
+      result = fresh.content;
+      result.splice(1, 0, {
+        type: "text",
+        text: `Tab ${tab.id} is unloaded (discarded), so a fresh copy was read in a temporary tab.`,
+      });
+    } else {
+      const content = await fetchTabContent(tab, offset, opts.consentWaitMs);
+      result = formatTabContent(tab, offset, content, opts);
+    }
+
     if (others.length) {
       result.splice(1, 0, {
         type: "text",
@@ -422,52 +640,26 @@ mcpServer.tool(
   `Open an https URL in a new tab, wait until it has loaded and rendered, and return its text
    in one call. Use for live pages where a plain web fetch returns stale or empty content.`,
   {
-    url: z.string(),
+    url: z.string().describe("https URL; bare domains get https:// and http:// is upgraded"),
     settleMs: z
       .number()
       .int()
       .min(0)
       .max(15_000)
-      .default(1500)
-      .describe("Extra wait after load for script rendered content"),
-    timeoutMs: z.number().int().min(1000).max(60_000).default(20_000),
+      .default(DEFAULT_SETTLE_MS)
+      .describe("Wait after load before the first read"),
+    maxSettleMs: z
+      .number()
+      .int()
+      .min(0)
+      .max(30_000)
+      .default(DEFAULT_MAX_SETTLE_MS)
+      .describe("Upper bound for re-reading until the text stops changing (script rendered pages)"),
+    timeoutMs: z.number().int().min(1000).max(60_000).default(DEFAULT_LOAD_TIMEOUT_MS),
     closeAfter: z.boolean().default(false).describe("Close the tab again after reading"),
     ...slimParams,
   },
-  async ({ url, settleMs, timeoutMs, closeAfter, includeLinks, maxLinks, maxChars }) => {
-    const tabId = await browserApi.openTab(url);
-    if (tabId === undefined) {
-      return { content: [{ type: "text", text: "Failed to open tab" }], isError: true };
-    }
-
-    try {
-      const loaded = await waitForTabComplete(tabId, timeoutMs);
-      if (settleMs > 0) await sleep(settleMs);
-
-      const tabs = await browserApi.getTabList();
-      const tab = tabs.find((t) => t.id === tabId) ?? { id: tabId, url };
-      const result = await readTabSlim(
-        tab,
-        0,
-        { includeLinks, maxLinks, maxChars },
-        Math.max(settleMs, 1000)
-      );
-      if (!loaded) {
-        result.splice(1, 0, {
-          type: "text",
-          text: `Page had not finished loading after ${timeoutMs} ms; content may be incomplete.`,
-        });
-      }
-      if (!closeAfter) {
-        result.splice(1, 0, { type: "text", text: `Tab stays open as tab id ${tabId}.` });
-      }
-      return { content: result };
-    } finally {
-      if (closeAfter) {
-        await browserApi.closeTabs([tabId]).catch(() => undefined);
-      }
-    }
-  }
+  async ({ url, ...opts }) => openAndRead(url, { ...opts, offset: 0 })
 );
 
 const browserApi = new BrowserAPI();

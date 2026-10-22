@@ -3,7 +3,16 @@ import test from "node:test";
 
 import utils from "../dist/content-utils.js";
 
-const { compactText, slimLinks, slimContent, matchTabs } = utils;
+const {
+  compactText,
+  slimLinks,
+  slimContent,
+  matchTabs,
+  rawLengthForCompactPrefix,
+  pickActiveTab,
+  normalizeOpenUrl,
+  isConsentTabFor,
+} = utils;
 
 test("compactText collapses blank lines and space runs", () => {
   const input = "Title\r\n\r\n\r\n\r\n  Body   text\t\twith  gaps \n\n\n\nEnd  ";
@@ -63,4 +72,62 @@ test("matchTabs prefers exact URL, else most recent, case insensitive", () => {
 
   assert.equal(matchTabs(tabs, "nothing").best, undefined);
   assert.equal(matchTabs(tabs, "  ").best, undefined);
+});
+
+test("matchTabs needs all terms, ranks URL hits first and skips non web tabs", () => {
+  const tabs = [
+    { id: 1, url: "https://news.example/a", title: "Karakeep review", lastAccessed: 900 },
+    { id: 2, url: "https://www.karakeep.app/review", title: "Docs", lastAccessed: 100 },
+    { id: 3, url: "moz-extension://abc/options.html?requestUrl=karakeep", title: "Karakeep", lastAccessed: 999 },
+  ];
+  assert.equal(matchTabs(tabs, "karakeep").best.id, 2, "URL hit beats a newer title hit");
+  assert.equal(matchTabs(tabs, "karakeep review").best.id, 2);
+  assert.equal(matchTabs(tabs, "karakeep news").best.id, 1);
+  assert.equal(matchTabs(tabs, "karakeep missing").best, undefined);
+  assert.equal(matchTabs(tabs, "http://karakeep.app/review/").best.id, 2, "scheme, www and trailing slash ignored");
+  assert.ok(!matchTabs(tabs, "options").best, "extension pages are not readable");
+});
+
+test("rawLengthForCompactPrefix maps a cut in compacted text back to raw text", () => {
+  const raw = "  Alpha   beta\n\n\n\ngamma  delta ";
+  const compact = compactText(raw);
+  for (let k = 1; k <= compact.length; k++) {
+    const r = rawLengthForCompactPrefix(raw, k);
+    assert.equal(compactText(raw.slice(0, r)), compact.slice(0, k).trimEnd(), `k=${k}`);
+  }
+  const res = slimContent(raw, [], { includeLinks: false, maxLinks: 0, maxChars: 8 });
+  assert.equal(res.text, "Alpha be");
+  assert.equal(raw.slice(0, res.rawConsumed).trim(), "Alpha   be");
+  assert.equal(slimContent(raw, [], { includeLinks: false, maxLinks: 0, maxChars: 0 }).rawConsumed, raw.length);
+});
+
+test("pickActiveTab prefers active tabs, optionally only web pages", () => {
+  const tabs = [
+    { id: 1, url: "https://a.example", lastAccessed: 100, active: true },
+    { id: 2, url: "https://b.example", lastAccessed: 500, active: false },
+    { id: 3, url: "about:preferences", lastAccessed: 300, active: true },
+  ];
+  assert.equal(pickActiveTab(tabs).id, 3);
+  assert.equal(pickActiveTab(tabs, true).id, 1);
+  assert.equal(pickActiveTab([], true), undefined);
+});
+
+test("normalizeOpenUrl adds or upgrades to https and rejects other schemes", () => {
+  assert.deepEqual(normalizeOpenUrl(" https://a.example/x "), { url: "https://a.example/x" });
+  assert.equal(normalizeOpenUrl("http://a.example").url, "https://a.example");
+  assert.match(normalizeOpenUrl("http://a.example").note, /only opens https/);
+  assert.equal(normalizeOpenUrl("a.example/path").url, "https://a.example/path");
+  assert.throws(() => normalizeOpenUrl("ftp://a.example"), /Only https/);
+  assert.throws(() => normalizeOpenUrl("not a url"), /Only https/);
+});
+
+test("isConsentTabFor recognizes the extension's consent page by origin", () => {
+  const consent = {
+    id: 9,
+    url: `moz-extension://uuid/options.html?requestUrl=${encodeURIComponent("https://a.example/page?x=1")}`,
+  };
+  assert.equal(isConsentTabFor(consent, "https://a.example/other"), true);
+  assert.equal(isConsentTabFor(consent, "https://b.example/page"), false);
+  assert.equal(isConsentTabFor({ id: 1, url: "https://a.example" }, "https://a.example"), false);
+  assert.equal(isConsentTabFor(consent, undefined), false);
 });
