@@ -58,3 +58,7 @@ dist
 web-ext-artifacts/
 
 .DS_Store
+
+# Local working notes (handover and to do)
+HANDOVER.md
+TODO.md
