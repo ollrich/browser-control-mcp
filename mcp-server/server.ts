@@ -6,7 +6,7 @@ import { z } from "zod";
 import { BrowserAPI } from "./browser-api";
 import dayjs from "dayjs";
 import relativeTime from "dayjs/plugin/relativeTime";
-import type { BrowserTab, TabContentExtensionMessage } from "@browser-control-mcp/common";
+import type { BrowserTab, PageMeta, TabContentExtensionMessage } from "@browser-control-mcp/common";
 import fs from "fs";
 import path from "path";
 import {
@@ -527,6 +527,18 @@ async function fetchTabContent(
   consentWaitMs: number,
   includeLinks = false
 ): Promise<TabContentExtensionMessage> {
+  return withDomainConsent(tab, consentWaitMs, () =>
+    browserApi.getTabContent(tab.id as number, offset, includeLinks)
+  );
+}
+
+// Run a page read; when the extension asks the user for consent to the domain,
+// wait for it (see waitForConsent) and run the read once more.
+async function withDomainConsent<T>(
+  tab: BrowserTab,
+  consentWaitMs: number,
+  read: () => Promise<T>
+): Promise<T> {
   const tabId = tab.id as number;
   const pendingConsent = (error: unknown) =>
     new ConsentPendingError(
@@ -534,7 +546,7 @@ async function fetchTabContent(
     );
 
   try {
-    return await browserApi.getTabContent(tabId, offset, includeLinks);
+    return await read();
   } catch (error) {
     if (!CONSENT_ERROR.test(errorText(error))) {
       throw error;
@@ -545,7 +557,7 @@ async function fetchTabContent(
       throw pendingConsent(error);
     }
     try {
-      return await browserApi.getTabContent(tabId, offset, includeLinks);
+      return await read();
     } catch (retryError) {
       throw CONSENT_ERROR.test(errorText(retryError)) ? pendingConsent(retryError) : retryError;
     }
@@ -963,6 +975,116 @@ registerTool(
       });
     }
     return { content };
+  }
+);
+
+// Features of the own extension build: fail with a clear message on the stock add-on.
+async function requireExtensionCommand(command: string, feature: string): Promise<void> {
+  const info = await browserApi.getExtensionInfo();
+  if (info?.commands.includes(command)) return;
+  throw new Error(
+    info
+      ? `${feature} needs a newer Firefox Control extension; the connected version ${info.version} does not support it.`
+      : `${feature} needs the Firefox Control extension 2.0. The connected add-on is the stock one from addons.mozilla.org, which does not support it.`
+  );
+}
+
+function formatPageMeta(meta: PageMeta): string {
+  const pairs = (record: Record<string, string>) =>
+    Object.entries(record)
+      .map(([key, value]) => `${key}=${value}`)
+      .join(", ");
+  const lines = [
+    `Title: ${meta.title}`,
+    meta.lang && `Language: ${meta.lang}`,
+    meta.description && `Description: ${meta.description}`,
+    meta.canonical && `Canonical: ${meta.canonical}`,
+    meta.robots && `Robots: ${meta.robots}`,
+    Object.keys(meta.openGraph).length && `Open Graph: ${pairs(meta.openGraph)}`,
+    Object.keys(meta.twitter).length && `Twitter: ${pairs(meta.twitter)}`,
+    meta.alternates.length && `Alternates: ${meta.alternates.map((a) => `${a.hreflang} ${a.href}`).join(", ")}`,
+    meta.headings.length && `Headings:\n${meta.headings.map((h) => `${"#".repeat(h.level)} ${h.text}`).join("\n")}`,
+    meta.jsonLd.length && `JSON-LD (${meta.jsonLd.length} block${meta.jsonLd.length === 1 ? "" : "s"}):\n${JSON.stringify(meta.jsonLd, null, 1)}`,
+  ];
+  return lines.filter(Boolean).join("\n");
+}
+
+registerTool(
+  "read-page-meta",
+  `Read a tab's metadata instead of its text: title, meta description, canonical URL,
+   robots, Open Graph and Twitter tags, hreflang alternates, JSON-LD structured data and
+   the h1 to h3 outline. The tab is chosen like in read-tab. Needs extension 2.0.`,
+  {
+    match: z.string().optional().describe("URL or title fragment of the tab, as in read-tab"),
+    tabId: z.number().optional(),
+    consentWaitMs: slimParams.consentWaitMs,
+  },
+  READS_WEB,
+  async ({ match, tabId, consentWaitMs }) => {
+    await requireExtensionCommand("get-page-meta", "Reading page metadata");
+    const { tab, missing } = selectTab(await browserApi.getTabList(), match, tabId);
+    if (!tab) return missing;
+
+    const meta =
+      tab.discarded && tab.url
+        ? await withTemporaryTab(tab.url, consentWaitMs, (copy) => browserApi.getPageMeta(copy.id as number))
+        : await withDomainConsent(tab, consentWaitMs, () => browserApi.getPageMeta(tab.id as number));
+    return {
+      content: [
+        { type: "text", text: formatTabLine(tab) },
+        { type: "text", text: formatPageMeta(meta) },
+      ],
+    };
+  }
+);
+
+registerTool(
+  "read-selection",
+  `Read the text the user has selected in a tab (default: the active tab), for example
+   when they say "this paragraph" or "what I marked". Needs extension 2.0.`,
+  {
+    match: z.string().optional().describe("URL or title fragment of the tab, as in read-tab"),
+    tabId: z.number().optional(),
+  },
+  READS_WEB,
+  async ({ match, tabId }) => {
+    await requireExtensionCommand("get-selection", "Reading the selection");
+    const { tab, missing } = selectTab(await browserApi.getTabList(), match, tabId);
+    if (!tab) return missing;
+    if (tab.discarded) {
+      return { content: [{ type: "text", text: `Tab ${tab.id} is unloaded, so nothing can be selected in it.` }], isError: true };
+    }
+
+    const text = await withDomainConsent(tab, 0, () => browserApi.getSelection(tab.id as number));
+    return {
+      content: [
+        { type: "text", text: formatTabLine(tab) },
+        { type: "text", text: text.trim() ? text : "Nothing is selected in this tab." },
+      ],
+    };
+  }
+);
+
+registerTool(
+  "search-bookmarks",
+  `Search the user's bookmarks by words in title or URL; returns title, URL, folder and
+   date added. The first use asks the user for the bookmarks permission. Needs extension 2.0.`,
+  {
+    query: z.string().min(1),
+    limit: z.number().int().min(1).max(200).default(50),
+  },
+  READS_BROWSER,
+  async ({ query, limit }) => {
+    await requireExtensionCommand("search-bookmarks", "Searching bookmarks");
+    const items = await browserApi.searchBookmarks(query, limit);
+    if (items.length === 0) {
+      return { content: [{ type: "text", text: `No bookmarks match "${query}".` }] };
+    }
+    const lines = items.map((item) => {
+      const added = item.dateAdded ? `, added ${dayjs(item.dateAdded).format("YYYY-MM-DD")}` : "";
+      return `title="${item.title}", url=${item.url}, folder=${item.folder || "-"}${added}`;
+    });
+    return { content: [{ type: "text", text: [`${items.length} bookmarks`, ...lines].join("\n") }] };
   }
 );
 

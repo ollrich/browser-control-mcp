@@ -11,6 +11,9 @@ export const BROWSER_API_OPERATIONS = [
   "groupTabs",
   "captureScreenshot",
   "getExtensionInfo",
+  "getPageMeta",
+  "getSelection",
+  "searchBookmarks",
 ] as const;
 
 export type BrowserApiOperation = (typeof BROWSER_API_OPERATIONS)[number];

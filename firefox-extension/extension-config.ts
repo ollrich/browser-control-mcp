@@ -62,6 +62,21 @@ export const AVAILABLE_TOOLS: ToolInfo[] = [
     description: "Allows the MCP server to get information about the currently active tab"
   },
   {
+    id: "read-page-meta",
+    name: "Read Page Metadata",
+    description: "Allows the MCP server to read meta tags, structured data (JSON-LD) and headings of web pages"
+  },
+  {
+    id: "read-selection",
+    name: "Read Selected Text",
+    description: "Allows the MCP server to read the text you have selected in a tab"
+  },
+  {
+    id: "search-bookmarks",
+    name: "Search Bookmarks",
+    description: "Allows the MCP server to search your bookmarks (asks for the bookmarks permission first)"
+  },
+  {
     id: "capture-tab-screenshot",
     name: "Capture Tab Screenshot",
     description: "Allows the MCP server to capture a screenshot of a tab, after you authorize that tab with the toolbar button"
@@ -83,6 +98,9 @@ export const COMMAND_TO_TOOL_ID: Record<ServerMessageRequest["cmd"], string> = {
   "capture-screenshot": "capture-tab-screenshot",
   // Not a tool of its own and not switchable: the version handshake.
   "get-extension-info": "extension-info",
+  "get-page-meta": "read-page-meta",
+  "get-selection": "read-selection",
+  "search-bookmarks": "search-bookmarks",
 };
 
 // Storage schema for tool settings

@@ -117,9 +117,19 @@ function startFakeExtension(port, state) {
         break;
       }
       case "get-extension-info":
+      case "get-page-meta":
+      case "get-selection":
+      case "search-bookmarks": {
         if (!state.ownBuild) return fail(`Command '${payload.cmd}' is disabled in extension settings`);
-        reply({ resource: "extension-info", version: "2.0.0", commands: state.ownBuild });
+        const tab = state.tabs.find((t) => t.id === payload.tabId);
+        if (payload.cmd === "get-extension-info") reply({ resource: "extension-info", version: "2.0.0", commands: state.ownBuild });
+        if (payload.cmd === "get-page-meta") reply({ resource: "page-meta", tabId: tab.id, meta: tab.meta });
+        if (payload.cmd === "get-selection") reply({ resource: "selection", tabId: tab.id, text: tab.selection ?? "" });
+        if (payload.cmd === "search-bookmarks") {
+          reply({ resource: "bookmarks", items: state.bookmarks.filter((b) => b.title.toLowerCase().includes(payload.query)) });
+        }
         break;
+      }
       default:
         // The stock add-on rejects commands it does not know.
         fail(`Command '${payload.cmd}' is disabled in extension settings`);
@@ -477,6 +487,59 @@ test("temporary tabs open in the background and links are only requested when wa
   state.payloads.length = 0;
   await leader.callTool({ name: "open-and-read-tab", arguments: { url: "https://quiet.example", settleMs: 0 } });
   assert.equal(state.payloads.find((p) => p.cmd === "open-tab").active, undefined, "kept tabs open in front");
+});
+
+test("extension 2.0 tools explain what they need on the stock add-on", async () => {
+  for (const [name, args] of [
+    ["read-page-meta", { tabId: 2 }],
+    ["read-selection", { tabId: 2 }],
+    ["search-bookmarks", { query: "paper" }],
+  ]) {
+    const res = await leader.callTool({ name, arguments: args });
+    assert.equal(res.isError, true, name);
+    assert.match(textOf(res), /needs the Firefox Control extension 2\.0\. The connected add-on is the stock one/, name);
+  }
+});
+
+test("extension 2.0 tools work against an own build", async () => {
+  // A new connection, so the server repeats the handshake.
+  state.ownBuild = ["get-extension-info", "get-page-meta", "get-selection", "search-bookmarks"];
+  ext.close();
+  ext = await startFakeExtension(port, state);
+  const karakeep = state.tabs.find((t) => t.id === 2);
+  karakeep.meta = {
+    title: "Karakeep",
+    lang: "en",
+    description: "Bookmark everything",
+    canonical: "https://karakeep.app/",
+    openGraph: { title: "Karakeep" },
+    twitter: {},
+    alternates: [],
+    jsonLd: [{ "@type": "WebApplication" }],
+    headings: [{ level: 1, text: "Dashboard" }],
+  };
+  karakeep.selection = "marked words";
+  state.bookmarks = [
+    { title: "Paper on tabs", url: "https://papers.example/1", folder: "Bookmarks Menu / Research", dateAdded: Date.UTC(2026, 9, 1) },
+  ];
+  try {
+    let res = await leader.callTool({ name: "read-page-meta", arguments: { match: "karakeep" } });
+    let text = textOf(res);
+    assert.match(text, /Description: Bookmark everything/);
+    assert.match(text, /Open Graph: title=Karakeep/);
+    assert.match(text, /# Dashboard/);
+    assert.match(text, /JSON-LD \(1 block\)/);
+
+    res = await leader.callTool({ name: "read-selection", arguments: { tabId: 2 } });
+    assert.match(textOf(res), /marked words/);
+
+    res = await leader.callTool({ name: "search-bookmarks", arguments: { query: "paper" } });
+    assert.match(textOf(res), /title="Paper on tabs", url=https:\/\/papers\.example\/1, folder=Bookmarks Menu \/ Research, added 2026-10-01/);
+  } finally {
+    state.ownBuild = false;
+    ext.close();
+    ext = await startFakeExtension(port, state);
+  }
 });
 
 test("a second session forwards through the broker", async () => {

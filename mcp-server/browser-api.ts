@@ -6,6 +6,8 @@ import type {
   ServerMessage,
   TabContentExtensionMessage,
   ScreenshotExtensionMessage,
+  PageMeta,
+  BookmarkItem,
   ServerMessageRequest,
   ExtensionError,
 } from "@browser-control-mcp/common";
@@ -313,6 +315,27 @@ export class BrowserAPI {
     });
   }
 
+  async getPageMeta(tabId: number): Promise<PageMeta> {
+    return this.run("getPageMeta", [tabId], async () => {
+      const correlationId = await this.sendMessageToExtension({ cmd: "get-page-meta", tabId });
+      return (await this.waitForResponse(correlationId, "page-meta")).meta;
+    });
+  }
+
+  async getSelection(tabId: number): Promise<string> {
+    return this.run("getSelection", [tabId], async () => {
+      const correlationId = await this.sendMessageToExtension({ cmd: "get-selection", tabId });
+      return (await this.waitForResponse(correlationId, "selection")).text;
+    });
+  }
+
+  async searchBookmarks(query: string, limit: number): Promise<BookmarkItem[]> {
+    return this.run("searchBookmarks", [query, limit], async () => {
+      const correlationId = await this.sendMessageToExtension({ cmd: "search-bookmarks", query, limit });
+      return (await this.waitForResponse(correlationId, "bookmarks")).items;
+    });
+  }
+
   // Routes an operation: retry setup if this session could not start, forward to
   // the broker when another session owns the browser port, else talk directly.
   private async run<T>(
@@ -560,6 +583,12 @@ export class BrowserAPI {
         );
       case "getExtensionInfo":
         return await this.getExtensionInfo();
+      case "getPageMeta":
+        return await this.getPageMeta(args[0] as number);
+      case "getSelection":
+        return await this.getSelection(args[0] as number);
+      case "searchBookmarks":
+        return await this.searchBookmarks(args[0] as string, args[1] as number);
       case "captureScreenshot":
         return await this.captureScreenshot(
           args[0] as number,

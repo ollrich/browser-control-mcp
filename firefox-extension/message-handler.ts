@@ -5,11 +5,15 @@ import type {
 import { WebsocketClient } from "./client";
 import { isCommandAllowed, isDomainInDenyList, COMMAND_TO_TOOL_ID, addAuditLogEntry } from "./extension-config";
 import { hasCaptureConsent, markTabAsAwaitingConsent } from "./capture-consent";
+import { collectPageMeta, collectSelection } from "./page-scripts";
 
 const MAX_CONTENT_LENGTH = 50_000;
 const MAX_TAB_CONTENT_RESPONSE_LENGTH = 2_000_000;
 // Time to let a newly foregrounded tab paint before capturing it
 const TAB_PAINT_DELAY_MS = 250;
+// JSON-LD can be large (shops, recipes); keep the page meta response small.
+const MAX_JSON_LD_LENGTH = 20_000;
+const DEFAULT_BOOKMARK_LIMIT = 50;
 
 export class MessageHandler {
   private client: WebsocketClient;
@@ -74,6 +78,15 @@ export class MessageHandler {
         break;
       case "get-extension-info":
         await this.sendExtensionInfo(req.correlationId);
+        break;
+      case "get-page-meta":
+        await this.sendPageMeta(req.correlationId, req.tabId);
+        break;
+      case "get-selection":
+        await this.sendSelection(req.correlationId, req.tabId);
+        break;
+      case "search-bookmarks":
+        await this.sendBookmarks(req.correlationId, req.query, req.limit);
         break;
       case "capture-screenshot":
         await this.captureScreenshot(
@@ -391,6 +404,91 @@ export class MessageHandler {
       resource: "find-highlight-result",
       correlationId,
       noOfResults: findResults.count,
+    });
+  }
+
+  // Deny list and per domain consent, as for reading the page text.
+  private async assertPageAccess(tabId: number): Promise<void> {
+    const tab = await browser.tabs.get(tabId);
+    if (tab.url && (await isDomainInDenyList(tab.url))) {
+      throw new Error(`Domain in tab URL is in the deny list`);
+    }
+    await this.checkForUrlPermission(tab.url);
+  }
+
+  private async sendPageMeta(correlationId: string, tabId: number): Promise<void> {
+    await this.assertPageAccess(tabId);
+    const [meta] = await browser.tabs.executeScript(tabId, {
+      code: `(${collectPageMeta.toString()})()`,
+    });
+    if (JSON.stringify(meta.jsonLd).length > MAX_JSON_LD_LENGTH) {
+      meta.jsonLd = [{ truncated: `JSON-LD longer than ${MAX_JSON_LD_LENGTH} characters, omitted` }];
+    }
+    await this.client.sendResourceToServer({
+      resource: "page-meta",
+      correlationId,
+      tabId,
+      meta,
+    });
+  }
+
+  private async sendSelection(correlationId: string, tabId: number): Promise<void> {
+    await this.assertPageAccess(tabId);
+    const [text] = await browser.tabs.executeScript(tabId, {
+      code: `(${collectSelection.toString()})()`,
+    });
+    await this.client.sendResourceToServer({
+      resource: "selection",
+      correlationId,
+      tabId,
+      text: typeof text === "string" ? text : "",
+    });
+  }
+
+  private async sendBookmarks(
+    correlationId: string,
+    query: string,
+    limit: number = DEFAULT_BOOKMARK_LIMIT
+  ): Promise<void> {
+    await this.checkForGlobalPermission(["bookmarks"]);
+
+    const folderPaths = new Map<string, string>();
+    const folderPath = async (folderId: string | undefined): Promise<string> => {
+      const names: string[] = [];
+      let id = folderId;
+      while (id) {
+        const cached = folderPaths.get(id);
+        if (cached !== undefined) {
+          names.unshift(cached);
+          break;
+        }
+        const [folder] = await browser.bookmarks.get(id);
+        // The root has no parent and no useful title.
+        if (!folder?.parentId) break;
+        names.unshift(folder.title);
+        id = folder.parentId;
+      }
+      const path = names.filter(Boolean).join(" / ");
+      if (folderId) folderPaths.set(folderId, path);
+      return path;
+    };
+
+    const items = [];
+    for (const node of await browser.bookmarks.search(query)) {
+      if (!node.url || (await isDomainInDenyList(node.url))) continue;
+      items.push({
+        title: node.title,
+        url: node.url,
+        folder: await folderPath(node.parentId),
+        dateAdded: node.dateAdded,
+      });
+      if (items.length >= limit) break;
+    }
+
+    await this.client.sendResourceToServer({
+      resource: "bookmarks",
+      correlationId,
+      items,
     });
   }
 

@@ -19,7 +19,8 @@
     ],
     "optional_permissions": [
         "*://*/*",
-        "find"
+        "find",
+        "bookmarks"
     ],
     "background": {
       "scripts": ["dist/background.js"]

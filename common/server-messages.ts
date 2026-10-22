@@ -72,6 +72,25 @@ export interface GetExtensionInfoServerMessage extends ServerMessageBase {
   cmd: "get-extension-info";
 }
 
+// Extension 2.0: meta tags, JSON-LD and headings of a page.
+export interface GetPageMetaServerMessage extends ServerMessageBase {
+  cmd: "get-page-meta";
+  tabId: number;
+}
+
+// Extension 2.0: the text the user has selected in a tab.
+export interface GetSelectionServerMessage extends ServerMessageBase {
+  cmd: "get-selection";
+  tabId: number;
+}
+
+// Extension 2.0: bookmarks matching a query (needs the optional bookmarks permission).
+export interface SearchBookmarksServerMessage extends ServerMessageBase {
+  cmd: "search-bookmarks";
+  query: string;
+  limit?: number;
+}
+
 export type ServerMessage =
   | OpenTabServerMessage
   | CloseTabsServerMessage
@@ -84,6 +103,9 @@ export type ServerMessage =
   | GroupTabsServerMessage
   | GetCurrentTabServerMessage
   | CaptureScreenshotServerMessage
-  | GetExtensionInfoServerMessage;
+  | GetExtensionInfoServerMessage
+  | GetPageMetaServerMessage
+  | GetSelectionServerMessage
+  | SearchBookmarksServerMessage;
 
 export type ServerMessageRequest = ServerMessage & { correlationId: string };

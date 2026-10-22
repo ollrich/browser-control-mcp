@@ -76,6 +76,18 @@
             "description": "Find text in an open tab and return snippets with offsets"
         },
         {
+            "name": "read-page-meta",
+            "description": "Read meta tags, JSON-LD and headings of a tab (extension 2.0)"
+        },
+        {
+            "name": "read-selection",
+            "description": "Read the text selected in a tab (extension 2.0)"
+        },
+        {
+            "name": "search-bookmarks",
+            "description": "Search bookmarks with folder paths (extension 2.0)"
+        },
+        {
             "name": "open-browser-tab",
             "description": "Open a new tab in the browser"
         },

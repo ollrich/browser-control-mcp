@@ -697,6 +697,84 @@ describe("MessageHandler", () => {
       });
     });
 
+    describe("page meta, selection and bookmarks", () => {
+      beforeEach(() => {
+        (browser.tabs.get as jest.Mock).mockResolvedValue({ id: 123, url: "https://example.com" });
+        (browser.permissions.contains as jest.Mock).mockResolvedValue(true);
+      });
+
+      it("should send page meta and drop oversized JSON-LD", async () => {
+        (browser.tabs.executeScript as jest.Mock).mockResolvedValue([
+          { title: "T", openGraph: {}, twitter: {}, alternates: [], headings: [], jsonLd: [{ big: "x".repeat(30_000) }] },
+        ]);
+
+        await messageHandler.handleDecodedMessage({ cmd: "get-page-meta", tabId: 123, correlationId: "c1" });
+
+        const sent = (mockClient.sendResourceToServer as jest.Mock).mock.calls[0][0];
+        expect(sent).toMatchObject({ resource: "page-meta", tabId: 123, meta: { title: "T" } });
+        expect(JSON.stringify(sent.meta.jsonLd)).toContain("omitted");
+        expect((browser.tabs.executeScript as jest.Mock).mock.calls[0][1].code).toContain("application/ld+json");
+      });
+
+      it("should refuse page meta without domain consent", async () => {
+        (browser.permissions.contains as jest.Mock).mockResolvedValue(false);
+        (browser.runtime.getURL as jest.Mock).mockReturnValue("moz-extension://x/options.html");
+
+        await expect(
+          messageHandler.handleDecodedMessage({ cmd: "get-page-meta", tabId: 123, correlationId: "c1" })
+        ).rejects.toThrow(/not yet granted permission/);
+        expect(browser.tabs.executeScript).not.toHaveBeenCalled();
+      });
+
+      it("should send the selected text", async () => {
+        (browser.tabs.executeScript as jest.Mock).mockResolvedValue(["picked words"]);
+
+        await messageHandler.handleDecodedMessage({ cmd: "get-selection", tabId: 123, correlationId: "c2" });
+
+        expect(mockClient.sendResourceToServer).toHaveBeenCalledWith({
+          resource: "selection",
+          correlationId: "c2",
+          tabId: 123,
+          text: "picked words",
+        });
+      });
+
+      it("should search bookmarks with folder paths and skip denied domains", async () => {
+        (browser.storage.local.get as jest.Mock).mockResolvedValue({
+          config: { secret: "s", ports: [8089], domainDenyList: ["blocked.example"] },
+        });
+        (browser.bookmarks.search as jest.Mock).mockResolvedValue([
+          { id: "f1", title: "Research", parentId: "menu" },
+          { id: "b1", title: "Paper", url: "https://papers.example/1", parentId: "f1", dateAdded: 5 },
+          { id: "b2", title: "Hidden", url: "https://blocked.example/x", parentId: "f1" },
+        ]);
+        const nodes: Record<string, object> = {
+          f1: { id: "f1", title: "Research", parentId: "menu" },
+          menu: { id: "menu", title: "Bookmarks Menu", parentId: "root" },
+          root: { id: "root", title: "" },
+        };
+        (browser.bookmarks.get as jest.Mock).mockImplementation(async (id: string) => [nodes[id]]);
+
+        await messageHandler.handleDecodedMessage({ cmd: "search-bookmarks", query: "paper", correlationId: "c3" });
+
+        expect(mockClient.sendResourceToServer).toHaveBeenCalledWith({
+          resource: "bookmarks",
+          correlationId: "c3",
+          items: [{ title: "Paper", url: "https://papers.example/1", folder: "Bookmarks Menu / Research", dateAdded: 5 }],
+        });
+      });
+
+      it("should ask for the bookmarks permission first", async () => {
+        (browser.permissions.contains as jest.Mock).mockResolvedValue(false);
+        (browser.runtime.getURL as jest.Mock).mockReturnValue("moz-extension://x/options.html");
+
+        await expect(
+          messageHandler.handleDecodedMessage({ cmd: "search-bookmarks", query: "x", correlationId: "c4" })
+        ).rejects.toThrow(/bookmarks/);
+        expect(browser.bookmarks.search).not.toHaveBeenCalled();
+      });
+    });
+
     describe("audit log", () => {
       it("should count repeated polling calls instead of adding entries", async () => {
         const { addAuditLogEntry } = jest.requireActual("../extension-config");

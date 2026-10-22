@@ -92,6 +92,44 @@ export interface ExtensionInfoExtensionMessage extends ExtensionMessageBase {
   commands: string[];
 }
 
+export interface PageMeta {
+  title: string;
+  lang?: string;
+  description?: string;
+  canonical?: string;
+  robots?: string;
+  openGraph: Record<string, string>;
+  twitter: Record<string, string>;
+  alternates: { hreflang: string; href: string }[];
+  jsonLd: unknown[];
+  headings: { level: number; text: string }[];
+}
+
+export interface PageMetaExtensionMessage extends ExtensionMessageBase {
+  resource: "page-meta";
+  tabId: number;
+  meta: PageMeta;
+}
+
+export interface SelectionExtensionMessage extends ExtensionMessageBase {
+  resource: "selection";
+  tabId: number;
+  text: string;
+}
+
+export interface BookmarkItem {
+  title: string;
+  url: string;
+  // Folder path, e.g. "Bookmarks Menu / Research".
+  folder: string;
+  dateAdded?: number;
+}
+
+export interface BookmarksExtensionMessage extends ExtensionMessageBase {
+  resource: "bookmarks";
+  items: BookmarkItem[];
+}
+
 export type ExtensionMessage =
   | TabContentExtensionMessage
   | TabsExtensionMessage
@@ -104,7 +142,10 @@ export type ExtensionMessage =
   | TabGroupCreatedExtensionMessage
   | CurrentTabExtensionMessage
   | ScreenshotExtensionMessage
-  | ExtensionInfoExtensionMessage;
+  | ExtensionInfoExtensionMessage
+  | PageMetaExtensionMessage
+  | SelectionExtensionMessage
+  | BookmarksExtensionMessage;
 
 export interface ExtensionError {
   correlationId: string;
