@@ -15,11 +15,9 @@
     "esbuild": "0.25.1",
     "jest": "^30.0.4",
     "jest-environment-jsdom": "^30.0.4",
-    "nx": "20.6.0",
     "ts-jest": "^29.4.0",
     "typescript": "^5.8.2",
     "@types/firefox-webext-browser": "^120.0.4",
     "@browser-control-mcp/common": "../common"
-  },
-  "nx": {}
+  }
 }

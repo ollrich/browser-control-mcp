@@ -9,12 +9,8 @@ import broker from "../dist/singleton-broker.js";
 
 const { BrowserAPI, buildPortInUseMessage, getWebSocketHosts } = browserApi;
 
-test("binds to both IPv4 and IPv6 loopback outside containers", () => {
-  assert.deepEqual(getWebSocketHosts(false), ["127.0.0.1", "::1"]);
-});
-
-test("binds to all interfaces inside containers", () => {
-  assert.deepEqual(getWebSocketHosts(true), ["0.0.0.0"]);
+test("binds to both IPv4 and IPv6 loopback", () => {
+  assert.deepEqual(getWebSocketHosts(), ["127.0.0.1", "::1"]);
 });
 
 test("port-in-use guidance points to broker forwarding", () => {
@@ -46,14 +42,9 @@ test("browser operation whitelist is stable for broker forwarding", () => {
   assert.equal(browserApi.isBrowserApiOperation("constructor"), false);
 });
 
-test("BrowserAPI exports transport mode names", () => {
-  assert.deepEqual(browserApi.BROWSER_TRANSPORT_MODES, ["direct", "forwarding"]);
-});
-
 test("BrowserAPI forwards operations to a live broker for the same port and key", async () => {
   const previousSecret = process.env.EXTENSION_SECRET;
   const previousPort = process.env.EXTENSION_PORT;
-  const previousContainerized = process.env.CONTAINERIZED;
   const tcpServer = net.createServer();
 
   await new Promise((resolve, reject) => {
@@ -90,7 +81,6 @@ test("BrowserAPI forwards operations to a live broker for the same port and key"
 
   process.env.EXTENSION_SECRET = extensionSecret;
   process.env.EXTENSION_PORT = String(port);
-  delete process.env.CONTAINERIZED;
 
   const api = new BrowserAPI();
   try {
@@ -105,15 +95,12 @@ test("BrowserAPI forwards operations to a live broker for the same port and key"
     else process.env.EXTENSION_SECRET = previousSecret;
     if (previousPort === undefined) delete process.env.EXTENSION_PORT;
     else process.env.EXTENSION_PORT = previousPort;
-    if (previousContainerized === undefined) delete process.env.CONTAINERIZED;
-    else process.env.CONTAINERIZED = previousContainerized;
   }
 });
 
 test("BrowserAPI refreshes broker metadata when the cached broker socket disappears", async () => {
   const previousSecret = process.env.EXTENSION_SECRET;
   const previousPort = process.env.EXTENSION_PORT;
-  const previousContainerized = process.env.CONTAINERIZED;
   const tcpServer = net.createServer();
 
   await new Promise((resolve, reject) => {
@@ -147,7 +134,6 @@ test("BrowserAPI refreshes broker metadata when the cached broker socket disappe
 
   process.env.EXTENSION_SECRET = extensionSecret;
   process.env.EXTENSION_PORT = String(port);
-  delete process.env.CONTAINERIZED;
 
   const api = new BrowserAPI();
   let liveBroker;
@@ -187,8 +173,6 @@ test("BrowserAPI refreshes broker metadata when the cached broker socket disappe
     else process.env.EXTENSION_SECRET = previousSecret;
     if (previousPort === undefined) delete process.env.EXTENSION_PORT;
     else process.env.EXTENSION_PORT = previousPort;
-    if (previousContainerized === undefined) delete process.env.CONTAINERIZED;
-    else process.env.CONTAINERIZED = previousContainerized;
   }
 });
 
@@ -199,7 +183,6 @@ test("BrowserAPI close waits for leader broker socket cleanup", async () => {
 
   const previousSecret = process.env.EXTENSION_SECRET;
   const previousPort = process.env.EXTENSION_PORT;
-  const previousContainerized = process.env.CONTAINERIZED;
   const probeServer = net.createServer();
 
   await new Promise((resolve, reject) => {
@@ -217,7 +200,6 @@ test("BrowserAPI close waits for leader broker socket cleanup", async () => {
 
   process.env.EXTENSION_SECRET = extensionSecret;
   process.env.EXTENSION_PORT = String(port);
-  delete process.env.CONTAINERIZED;
 
   const api = new BrowserAPI();
   try {
@@ -234,15 +216,12 @@ test("BrowserAPI close waits for leader broker socket cleanup", async () => {
     else process.env.EXTENSION_SECRET = previousSecret;
     if (previousPort === undefined) delete process.env.EXTENSION_PORT;
     else process.env.EXTENSION_PORT = previousPort;
-    if (previousContainerized === undefined) delete process.env.CONTAINERIZED;
-    else process.env.CONTAINERIZED = previousContainerized;
   }
 });
 
 test("BrowserAPI close disconnects the accepted extension WebSocket", async () => {
   const previousSecret = process.env.EXTENSION_SECRET;
   const previousPort = process.env.EXTENSION_PORT;
-  const previousContainerized = process.env.CONTAINERIZED;
   const probeServer = net.createServer();
 
   await new Promise((resolve, reject) => {
@@ -256,7 +235,6 @@ test("BrowserAPI close disconnects the accepted extension WebSocket", async () =
 
   process.env.EXTENSION_SECRET = `secret-${port}`;
   process.env.EXTENSION_PORT = String(port);
-  delete process.env.CONTAINERIZED;
 
   const api = new BrowserAPI();
   const client = new WebSocket(`ws://localhost:${port}`);
@@ -279,15 +257,12 @@ test("BrowserAPI close disconnects the accepted extension WebSocket", async () =
     else process.env.EXTENSION_SECRET = previousSecret;
     if (previousPort === undefined) delete process.env.EXTENSION_PORT;
     else process.env.EXTENSION_PORT = previousPort;
-    if (previousContainerized === undefined) delete process.env.CONTAINERIZED;
-    else process.env.CONTAINERIZED = previousContainerized;
   }
 });
 
 test("BrowserAPI retries setup once a busy port without broker becomes free", async () => {
   const previousSecret = process.env.EXTENSION_SECRET;
   const previousPort = process.env.EXTENSION_PORT;
-  const previousContainerized = process.env.CONTAINERIZED;
   const blocker = net.createServer();
 
   await new Promise((resolve, reject) => {
@@ -299,7 +274,6 @@ test("BrowserAPI retries setup once a busy port without broker becomes free", as
 
   process.env.EXTENSION_SECRET = secret;
   process.env.EXTENSION_PORT = String(port);
-  delete process.env.CONTAINERIZED;
 
   const api = new BrowserAPI();
   let extension;
@@ -328,7 +302,5 @@ test("BrowserAPI retries setup once a busy port without broker becomes free", as
     else process.env.EXTENSION_SECRET = previousSecret;
     if (previousPort === undefined) delete process.env.EXTENSION_PORT;
     else process.env.EXTENSION_PORT = previousPort;
-    if (previousContainerized === undefined) delete process.env.CONTAINERIZED;
-    else process.env.CONTAINERIZED = previousContainerized;
   }
 });

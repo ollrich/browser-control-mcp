@@ -29,7 +29,6 @@ import {
 } from "./singleton-broker";
 
 export { BROWSER_API_OPERATIONS, isBrowserApiOperation } from "./browser-operations";
-export { BROWSER_TRANSPORT_MODES } from "./browser-transport";
 
 const WS_DEFAULT_PORT = 8089;
 const EXTENSION_RESPONSE_TIMEOUT_MS = 5000;
@@ -51,8 +50,9 @@ function trace(...args: unknown[]) {
   }
 }
 
-export function getWebSocketHosts(isContainerized: boolean): string[] {
-  return isContainerized ? ["0.0.0.0"] : ["127.0.0.1", "::1"];
+// Loopback only, on IPv4 and IPv6, so Firefox connects whichever way localhost resolves.
+export function getWebSocketHosts(): string[] {
+  return ["127.0.0.1", "::1"];
 }
 
 export function buildPortInUseMessage(port: number): string {
@@ -380,7 +380,7 @@ export class BrowserAPI {
   }
 
   private async becomeLeader(identity: BrokerIdentity, port: number): Promise<void> {
-    for (const host of getWebSocketHosts(Boolean(process.env.CONTAINERIZED))) {
+    for (const host of getWebSocketHosts()) {
       const wsServer = new WebSocket.Server({
         host,
         port,

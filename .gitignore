@@ -46,8 +46,6 @@ dist
 .yarn/install-state.gz
 .pnp.*
 
-.nx
-
 # Git worktrees
 .worktrees/
 
