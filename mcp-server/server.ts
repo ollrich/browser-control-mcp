@@ -220,7 +220,8 @@ registerTool(
     const shown = items.slice(0, limit);
     const lines = shown.map((item) => {
       const lastVisited = item.lastVisitTime ? dayjs(item.lastVisitTime).fromNow() : "unknown";
-      return `url=${item.url}, title="${item.title}", last visited=${lastVisited}`;
+      const title = item.title && item.title !== "null" ? `, title="${item.title}"` : "";
+      return `url=${item.url}${title}, last visited=${lastVisited}`;
     });
     const summary = `${shown.length} of ${items.length} pages${items.length > shown.length ? ` (raise limit to see more)` : ""}`;
     return { content: [{ type: "text", text: [summary, ...lines].join("\n") }] };

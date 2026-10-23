@@ -175,6 +175,7 @@ test("redactPersonalData masks contact and payment data but keeps ordinary numbe
   const text = [
     "Mail max.mustermann+news@example.co.uk or info@firma.de.",
     "Call +49 30 1234567, 0049 89/123456 or 030 1234567.",
+    "Imprint: +49 [0]511 5352-0, fax +49 (0)511 5352-129, local 0511 5352-129.",
     "IBAN DE89 3704 0044 0532 0130 00 and card 4111 1111 1111 1111.",
     "Not a card: 1234 5678 9012 3456. Date 22.10.2026, price 19,99 EUR, order 2026-10-22, year 1990.",
   ].join("\n");
@@ -183,6 +184,7 @@ test("redactPersonalData masks contact and payment data but keeps ordinary numbe
     [
       "Mail [email] or [email].",
       "Call [phone], [phone] or [phone].",
+      "Imprint: [phone], fax [phone], local [phone].",
       "IBAN [iban] and card [card].",
       "Not a card: 1234 5678 9012 3456. Date 22.10.2026, price 19,99 EUR, order 2026-10-22, year 1990.",
     ].join("\n")

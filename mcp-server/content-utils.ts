@@ -372,9 +372,10 @@ function passesLuhn(digits: string): boolean {
 
 /**
  * Mask personal data in text handed to the model: e-mail addresses, IBANs,
- * card numbers (Luhn checked) and phone numbers in international (+49, 0049)
- * or German (0 plus area code) notation. Deliberately conservative: dates,
- * prices and plain numbers stay.
+ * card numbers (Luhn checked) and phone numbers in international (+49, 0049,
+ * also with the trunk zero as [0] or (0)) or German (0 plus area code)
+ * notation, including a short extension like -0. Deliberately conservative:
+ * dates, prices and plain numbers stay.
  */
 export function redactPersonalData(text: string): string {
   return text
@@ -383,8 +384,8 @@ export function redactPersonalData(text: string): string {
     .replace(/\b(?:\d[ -]?){12,18}\d\b/g, (match) =>
       passesLuhn(match.replace(/\D/g, "")) ? "[card]" : match
     )
-    .replace(/(?:\+|\b00)\d{1,3}[ /.-]?\(?\d{1,5}\)?(?:[ /.-]?\d{2,}){1,4}\b/g, "[phone]")
-    .replace(/\b0\d{2,5}[ /-]\d{3,}(?:[ -]\d{2,})*\b/g, "[phone]");
+    .replace(/(?:\+|\b00)\d{1,3}[ /.-]?(?:[[(]0[\])][ /.-]?)?\(?\d{1,5}\)?(?:[ /.-]?\d{2,}){1,4}(?:-\d{1,4})?(?!\d)/g, "[phone]")
+    .replace(/\b0\d{2,5}[ /-]\d{3,}(?:[ -]\d{2,})*(?:-\d{1,4})?(?!\d)/g, "[phone]");
 }
 
 /** Mark phrase hits with «» again, e.g. after the snippet text was redacted. */
